@@ -18,3 +18,4 @@ dist/Legal/
 validation/*-run.txt
 validation/wrapper-tests.txt
 validation/portable-install.txt
+dist/SHA256SUMS.txt

@@ -14,6 +14,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Ensure installer compiler is available
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install Inno Setup.' }
+          }
       - name: Build Windows app
         shell: pwsh
         run: ./tools/build-windows.ps1
@@ -28,6 +35,15 @@ jobs:
           $process = Start-Process 'build/windows/dist/MuScriptor Local/MuScriptor Local.exe' -ArgumentList '--smoke-test' -PassThru
           if (!$process.WaitForExit(30000)) { $process.Kill(); throw 'App did not finish its startup check.' }
           if ($process.ExitCode -ne 0) { throw 'App startup check failed.' }
+      - name: Smoke-test setup installer
+        shell: pwsh
+        run: |
+          $directory = "$env:RUNNER_TEMP/MuScriptor Installed"
+          $setup = Start-Process 'dist/windows/MuScriptor-Local-Windows-x64-Setup-Preview.exe' -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$directory`"" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Setup installer failed.' }
+          $app = Start-Process "$directory/MuScriptor Local.exe" -ArgumentList '--smoke-test' -PassThru
+          if (!$app.WaitForExit(30000)) { $app.Kill(); throw 'Installed app startup timed out.' }
+          if ($app.ExitCode -ne 0) { throw 'Installed app failed.' }
       - name: Install and test the Windows CPU worker
         shell: pwsh
         run: |
@@ -37,4 +53,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MuScriptor-Local-Windows-x64-Preview
-          path: dist/windows/*.zip
+          path: |
+            dist/windows/*.zip
+            dist/windows/*.exe

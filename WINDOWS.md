@@ -15,8 +15,8 @@ On macOS, the shared worker reports the Apple chip, Apple MPS, and shared unifie
 On an x64 Windows machine with Python 3.12 and Git installed:
 
 1. Check out the `codex/windows-preview` branch.
-2. Run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1` from the project. This installs build dependencies into the current Python environment; use a dedicated virtual environment for development.
-3. Unzip `dist/windows/MuScriptor Local - Windows x64 Preview.zip` and open `MuScriptor Local.exe` inside its folder. Keep the entire extracted folder together.
+2. Install [Inno Setup 6](https://jrsoftware.org/isdl.php) for installer packaging, then run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1` from the project. This installs build dependencies into the current Python environment; use a dedicated virtual environment for development.
+3. Run `dist/windows/MuScriptor-Local-Windows-x64-Setup-Preview.exe`. It installs for the current user without administrator access and creates a Start Menu shortcut and uninstaller. A portable zip is also built; keep its entire extracted folder together.
 4. First launch installs a private Python runtime and engine under `%LOCALAPPDATA%\MuScriptor Local\Engine`. A visible setup status remains in the window. Logs are under `%LOCALAPPDATA%\MuScriptor Local\Logs` (App → Show Logs).
 5. Choose a model, accept that size’s Hugging Face terms, and connect your own read token. The actual model cache path appears in the window.
 6. Drop audio in, review or change the MIDI output folder, and click Transcribe.
@@ -29,10 +29,16 @@ The Python launcher can also be run from a development environment containing `P
 
 ## Validation and packaging
 
-The `Windows preview` GitHub Actions workflow builds the executable on Windows, runs headless UI tests, smoke-tests the packaged executable, installs the CPU worker in a fresh directory, and runs the wrapper tests. Successful runs attach a downloadable preview archive to the workflow run. These checks do not download gated model weights or validate a real NVIDIA GPU.
+The `Windows preview` GitHub Actions workflow builds the executable and setup installer on Windows, runs headless UI tests, smoke-tests the packaged executable, installs the CPU worker in a fresh directory, and runs the wrapper tests. Successful runs attach the installer and portable archive to the workflow run. The installer removes only the app and shortcuts when uninstalled; model caches, credentials, and MIDI remain untouched. These checks do not download gated model weights or validate a real NVIDIA GPU.
 
 Before publishing a Windows release, test on the actual PC: first launch, NVIDIA driver detection, actual CUDA model loading and transcription, all three model sizes permitted by the account, drag/drop, output folders with spaces/non-ASCII names, offline startup after download, safe collisions, restart/repair, and quitting during download/transcription. The current Mac cannot establish Windows GPU compatibility.
 
 The executable is not Authenticode-signed. No account credentials, model weights, or recordings are included. Official model licenses and account/terms requirements are the same as for the macOS app.
 
 Implementation references: [PyTorch Windows setup](https://pytorch.org/get-started/locally/) and [Qt process handling](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QProcess.html).
+
+## Continue on the Windows PC
+
+Clone this repository and check out `codex/windows-preview`. Give Codex this prompt:
+
+> Finish the Windows 1.0 beta for MuScriptor Local. Read WINDOWS.md, WINDOWS_HANDOFF.md, and the latest Windows preview workflow results. Test the setup installer, identify this PC's CPU/GPU and available memory, verify the displayed processor against the model's actual device, and run a complete local transcription using an authorized model. Check custom output folders, restart/offline behavior, and installer/uninstaller behavior. Fix any Windows-specific problems, then publish a Windows 1.0 beta release with the installer, portable zip, checksums, and accurate validation notes. Keep the existing macOS release available and do not publish credentials, recordings, local paths, or raw personal logs.
