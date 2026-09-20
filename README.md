@@ -1,23 +1,23 @@
 # MuScriptor Local
 
-A small native macOS window around the **official MuScriptor Large** Python engine. All audio processing runs on this Mac. No hosted inference, browser server, Electron, or audio uploads.
+A small native macOS window around the **official MuScriptor Small, Medium, and Large** Python engine. All audio processing runs on this Mac. No hosted inference, browser server, Electron, or audio uploads.
 
 ## Open and use
 
-Open **`/Users/nicho/Applications/MuScriptor Local.app`** in Finder or Spotlight. Drag one audio file into the window, or click to choose it. Wait for transcription, then use **Save MIDI**, **Reveal in Finder**, or **Convert Another**. Closing the window quits the app and stops its Python worker.
+Open **`/Users/nicho/Applications/MuScriptor Local.app`** in Finder or Spotlight. Choose **Small**, **Medium**, or **Large** at the top of the window. Drag one audio file in, or click to choose it, then review the full **MIDI destination**. Use **Change Folder…** to choose a different output folder and click **Transcribe** when ready. After transcription, use **Save MIDI Copy…**, **Reveal in Finder**, or **Convert Another**. Closing the window quits the app and stops its Python worker.
 
-On first use, accept the terms at <https://huggingface.co/MuScriptor/muscriptor-large>. Create a **read** token at <https://huggingface.co/settings/tokens> using the same account, paste it into the app’s secure field, and click **Connect & Download Large**. If using a fine-grained token, allow reading this gated model. The app stores authentication through Hugging Face, downloads the official weights, and loads them. No need to sign in on later launches. The weights are licensed CC BY-NC 4.0 with the additional conditions shown on the model page.
+On first use of each size, open its **model terms** link in the app and accept the terms for that model on Hugging Face. Create a **read** token at <https://huggingface.co/settings/tokens> using the same account, paste it into the app’s secure field, and click **Connect & Download** for your selected size. If already connected, use **Download**. If using a fine-grained token, allow reading this gated model. The app stores authentication through Hugging Face, downloads the official weights, and loads them. No need to sign in on later launches. The weights are licensed CC BY-NC 4.0 with the additional conditions shown on the model page.
 
-**Large is always selected. Apple MPS is preferred.** The status line shows the actual selected backend. Unsupported MPS operations use PyTorch’s CPU fallback; an MPS failure that prevents transcription restarts the whole song on CPU and displays a short notice. Ordinary audio or model errors do not silently change devices.
+**The model selector remembers your choice; Large is the initial default.** Switching releases the previous model from memory but keeps its downloaded files. Switching to an uncached model shows setup without automatically downloading it. Model changes are disabled while downloading, loading, or transcribing. **Apple MPS is preferred.** The status line shows the actual selected backend. Unsupported MPS operations use PyTorch’s CPU fallback; an MPS failure that prevents transcription restarts the whole song on CPU and displays a short notice. Ordinary audio or model errors do not silently change devices.
 
-Model download progress shows actual bytes received out of the 5.47 GB Large checkpoint. Transcription progress is MuScriptor’s actual count of completed five-second audio chunks. Loading and final MIDI writing use an indeterminate indicator. Long songs are processed in full; there is no excerpt limit. Quitting during a conversion cancels that conversion. Network interruptions are retried by Hugging Face’s HTTP downloader. Failed/canceled downloads clean up their partial file; quitting the app during download may require starting the download again.
+Model download progress shows actual bytes received and the total for the selected checkpoint. The window displays the actual model download folder as selectable text, respecting Hugging Face cache overrides; it does not open Finder. Transcription progress is MuScriptor’s actual count of completed five-second audio chunks. Loading and final MIDI writing use an indeterminate indicator. Long songs are processed in full; there is no excerpt limit. Quitting during a conversion cancels that conversion. Network interruptions are retried by Hugging Face’s HTTP downloader. Failed/canceled downloads clean up their partial file; quitting the app during download may require starting the download again.
 
 ## Audio and output
 
 - WAV, MP3 and FLAC work directly through the official loader. Other libsndfile formats, including AIFF and OGG, are also accepted.
 - M4A/AAC and formats unavailable in libsndfile are decoded by the bundled ARM64 FFmpeg. No Homebrew or manual conversion is needed. Decoding preserves the original rate and channels; **MuScriptor itself** converts to 16 kHz mono. Temporary WAVs are removed after completion or failure.
-- Output defaults to `<original stem>_transcription.mid` beside the source. Existing files are preserved; repeats get ` (2)`, ` (3)`, etc.
-- If the source folder cannot be written, the result is kept under `~/Library/Application Support/MuScriptor Local/Results/` and a normal Save dialog opens. Canceling that dialog does not discard the MIDI. Save MIDI can always save an additional copy.
+- Output defaults to `<original stem>_transcription.mid` beside the source. Before transcription, the app previews its full path and lets you choose another folder. Existing files are preserved; repeats get ` (2)`, ` (3)`, etc. If another file takes the previewed name during transcription, the result gets another unique name and the completed screen shows the actual saved path.
+- If the source folder cannot be written, the result is kept under `~/Library/Application Support/MuScriptor Local/Results/` and a normal Save dialog opens. Canceling that dialog does not discard the MIDI. Save MIDI Copy can always save an additional copy.
 - MIDI is generated by the upstream `transcribe()` and `events_to_midi_bytes()` APIs with standard greedy/prelude behavior, standard best-effort tempo detection, and **quantize=False**. The wrapper does not generate or edit note data. If optional tempo detection is unavailable, upstream’s supported default tempo is used and absolute note timing is retained.
 
 ## Installation locations
@@ -25,11 +25,11 @@ Model download progress shows actual bytes received out of the 5.47 GB Large che
 | Item | Location |
 | --- | --- |
 | Finder application | `/Users/nicho/Applications/MuScriptor Local.app` |
-| Wrapper, upstream checkout, isolated Python and dependencies | `/Users/nicho/Documents/_Repositories/muscriptorUI` |
+| Wrapper, upstream checkout, isolated Python and dependencies | `/Users/nicho/Documents/_Repositories/MuScriptor Local` |
 | Python environment | `.venv/` within that folder |
 | Private Python runtime (unused package cache is cleaned after setup) | `runtime/` within that folder |
 | Official MuScriptor source | `upstream/` within that folder |
-| Hugging Face model cache | `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-large/` |
+| Hugging Face model cache | `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/` |
 | Hugging Face credentials | `~/.cache/huggingface/token` and `stored_tokens` (owner-only permissions) |
 | Upstream’s standard tempo helper | `~/.cache/torch/hub/checkpoints/beat_this-final0.ckpt` |
 | Logs | `~/Library/Logs/MuScriptor Local/` |
@@ -48,21 +48,21 @@ Errors are short in the normal window. **MuScriptor Local → Show Logs** opens 
 
 ## Share with a friend
 
-Send **`dist/MuScriptor Local - Apple Silicon.zip`** and **`dist/Read Me First.txt`**. This copy automatically creates its own isolated installation in `~/Library/Application Support/MuScriptor Local/Engine/`. It includes the native UI and the pinned official engine source, but no token, model weights, recordings or MIDI. Your friend must accept the model terms with their own Hugging Face account and enter their own read token. They need an Apple Silicon Mac with macOS 14 or later, adequate memory for Large, and about 10 GB free for setup. Only this Mac has been used for hardware validation.
+Send **`dist/MuScriptor Local - Apple Silicon.zip`** and **`dist/Read Me First.txt`**. This copy automatically creates its own isolated installation in `~/Library/Application Support/MuScriptor Local/Engine/`. It includes the native UI and the pinned official engine source, but no token, model weights, recordings or MIDI. Your friend must accept the model terms with their own Hugging Face account and enter their own read token. They need an Apple Silicon Mac with macOS 14 or later, adequate memory for their selected model, and about 10 GB free for setup with Large. Keeping all three models requires additional disk space. Only this Mac has been used for hardware validation.
 
 The app is locally signed, not Apple-notarized, so a downloaded copy may need explicit approval in macOS Privacy & Security. This is a personal convenience wrapper, not an App Store release. Rebuild the share archive with `zsh tools/share.sh` after changing the wrapper or updating its engine. Your locally installed launcher continues using the project folder described above.
 
 ## Uninstall
 
 1. Quit MuScriptor Local and move `/Users/nicho/Applications/MuScriptor Local.app` to Trash.
-2. Move `/Users/nicho/Documents/_Repositories/muscriptorUI` to Trash to remove the wrapper, private runtime, installed dependencies and package cache.
+2. Move `/Users/nicho/Documents/_Repositories/MuScriptor Local` to Trash to remove the wrapper, private runtime, installed dependencies and package cache.
 3. Optionally remove `~/Library/Logs/MuScriptor Local/`. Review and save any MIDI files in `~/Library/Application Support/MuScriptor Local/Results/` before removing that folder.
-4. To reclaim model space, remove only `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-large/`. Leave other Hugging Face caches alone. The 77 MB `beat_this-final0.ckpt` can also be removed if no other app needs it.
+4. To reclaim model space, remove only `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/`. Leave other Hugging Face caches alone. The 77 MB `beat_this-final0.ckpt` can also be removed if no other app needs it.
 
 MIDI files already saved beside your audio or elsewhere stay intact. Hugging Face credentials are shared with other local Hugging Face tools, so uninstalling this wrapper leaves them alone. You can revoke the app’s read token in Hugging Face settings if you no longer need it.
 
 ## Validation
 
-See `validation/RESULTS.md` for actual completed checks and any remaining model-access blocker. `tests/test_wrapper.py` exercises real decoding and cleanup, safe output handling, disk errors, and device-failure classification. `validation/make_audio.py` creates an original 12-second test melody in five formats without using anyone else’s recording.
+See `validation/RESULTS.md` for actual completed checks and any remaining model-access blocker. `tests/test_wrapper.py` exercises real decoding and cleanup, model selection and cache routing, download progress paths, output previews and custom folders, safe output handling, disk errors, and device-failure classification. `validation/make_audio.py` creates an original 12-second test melody in five formats without using anyone else’s recording.
 
 Official project: <https://github.com/muscriptor/muscriptor>. Upstream code is MIT licensed; its license is in `upstream/LICENSE`.

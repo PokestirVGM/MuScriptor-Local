@@ -15,10 +15,15 @@ final class AppState: ObservableObject {
     @Published var result: URL? = nil
     @Published var token = ""
     @Published var needsSave = false
+    @Published var selectedModel = ["small", "medium", "large"].contains(UserDefaults.standard.string(forKey: "selectedModel") ?? "") ? UserDefaults.standard.string(forKey: "selectedModel")! : "large"
+    @Published var cachedModels: [String: Bool] = [:]
+    @Published var modelDirectory = ""
+    @Published var source: URL? = nil
+    @Published var destination: URL? = nil
+    var modelName: String { selectedModel.capitalized }
     private var worker: Process?
     private var input: FileHandle?
     private var activity: NSObjectProtocol?
-    private var pending: URL?
     private var started = false
     private var repairing = false
     private var setupProcess: Process?
@@ -37,9 +42,20 @@ final class AppState: ObservableObject {
             repair()
             return
         }
+        // A portable app update must also refresh an already-installed bridge.
+        if Bundle.main.object(forInfoDictionaryKey: "MuScriptorRoot") == nil {
+            do {
+                let bundledWorker = Bundle.main.resourceURL!.appendingPathComponent("engine/worker.py")
+                try Data(contentsOf: bundledWorker).write(to: root.appendingPathComponent("src/worker.py"), options: .atomic)
+            } catch {
+                started = false; busy = false
+                self.error = "The local engine couldn’t be updated. Use Repair Dependencies in the app menu."
+                return
+            }
+        }
         let process = Process()
         process.executableURL = python
-        process.arguments = ["-u", root.appendingPathComponent("src/worker.py").path]
+        process.arguments = ["-u", root.appendingPathComponent("src/worker.py").path, "--model", selectedModel]
         process.currentDirectoryURL = root
         var env = ProcessInfo.processInfo.environment
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -84,7 +100,10 @@ final class AppState: ObservableObject {
                         let line = buffer.prefix(upTo: newline)
                         buffer.removeSubrange(...newline)
                         if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
-                            DispatchQueue.main.async { self?.receive(event) }
+                            DispatchQueue.main.async {
+                                guard let self = self, self.worker === process else { return }
+                                self.receive(event)
+                            }
                         }
                     }
                 }
@@ -96,7 +115,9 @@ final class AppState: ObservableObject {
     }
 
     func send(_ command: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: command), let input = input else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: command), let input = input, worker?.isRunning == true else {
+            busy = false; error = "The engine connection closed. Click Try Again to restart it."; endActivity(); return
+        }
         do { try input.write(contentsOf: data + Data([10])) }
         catch { busy = false; self.error = "The engine connection closed. Restart the app."; endActivity() }
     }
@@ -107,23 +128,27 @@ final class AppState: ObservableObject {
         case "ready":
             authenticated = event["authenticated"] as? Bool ?? authenticated
             setup = !(event["cached"] as? Bool ?? false)
+            cachedModels = event["models"] as? [String: Bool] ?? cachedModels
+            modelDirectory = event["directory"] as? String ?? modelDirectory
             busy = false; progress = nil; message = ""; endActivity()
-            if setup && (event["authenticated"] as? Bool ?? false) { prepare() }
-            else if !setup, let source = pending { pending = nil; convert(source) }
+        case "planned":
+            if let path = event["path"] as? String { destination = URL(fileURLWithPath: path) }
+            busy = false; progress = nil; message = ""; endActivity()
         case "status": message = event["message"] as? String ?? "Working…"; progress = nil
         case "authenticated": authenticated = true
         case "download":
             let total = event["total"] as? Double ?? 1
             let completed = event["completed"] as? Double ?? 0
             progress = min(1, completed / max(1, total))
-            message = String(format: "Downloading Large… %.2f / %.2f GB", completed / 1_000_000_000, total / 1_000_000_000)
+            modelDirectory = event["directory"] as? String ?? modelDirectory
+            message = String(format: "Downloading %@… %.2f / %.2f GB", modelName, completed / 1_000_000_000, total / 1_000_000_000)
         case "warning": warning = event["message"] as? String ?? ""
         case "progress":
             message = "Transcribing…"
             let total = event["total"] as? Double ?? 1
             progress = min(1, (event["completed"] as? Double ?? 0) / max(1, total))
         case "complete":
-            if let path = event["path"] as? String { result = URL(fileURLWithPath: path) }
+            if let path = event["path"] as? String { result = URL(fileURLWithPath: path); destination = result }
             needsSave = event["needs_save"] as? Bool ?? false
             busy = false; setup = false; progress = nil; message = ""; endActivity()
             if needsSave { save() }
@@ -139,11 +164,23 @@ final class AppState: ObservableObject {
     func endActivity() { if let activity = activity { ProcessInfo.processInfo.endActivity(activity) }; activity = nil }
 
     func prepare() {
-        busy = true; error = ""; message = "Checking MuScriptor Large…"; beginActivity()
+        guard !busy else { return }
+        busy = true; error = ""; warning = ""; message = "Checking MuScriptor \(modelName)…"; beginActivity()
         send(["action": "prepare"])
     }
 
+    func selectModel(_ model: String) {
+        guard !busy, model != selectedModel else { return }
+        selectedModel = model
+        UserDefaults.standard.set(model, forKey: "selectedModel")
+        error = ""; warning = ""; progress = nil; modelDirectory = ""
+        if worker?.isRunning != true { started = false; start(); return }
+        busy = true; message = "Switching to \(modelName)…"
+        send(["action": "select_model", "model": model])
+    }
+
     func connect() {
+        guard !busy else { return }
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         token = ""; busy = true; error = ""; message = "Connecting to Hugging Face…"; beginActivity()
@@ -153,21 +190,50 @@ final class AppState: ObservableObject {
     func choose() {
         let panel = NSOpenPanel()
         panel.title = "Choose audio"
-        panel.prompt = "Transcribe"
+        panel.prompt = "Choose Audio"
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.audio, .movie]
         panel.allowsOtherFileTypes = true
-        panel.begin { response in if response == .OK, let url = panel.url { self.convert(url) } }
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in if response == .OK, let url = panel.url { self.convert(url) } }
     }
 
     func convert(_ url: URL) {
         guard !busy else { return }
         guard url.isFileURL else { error = "Choose an audio file stored on this Mac."; return }
-        if setup { pending = url; filename = url.lastPathComponent; return }
-        result = nil; filename = url.lastPathComponent; error = ""; warning = ""; busy = true
+        source = url; destination = nil; result = nil; filename = url.lastPathComponent
+        planOutput()
+    }
+
+    func planOutput(directory: URL? = nil) {
+        guard let source = source else { return }
+        error = ""; warning = ""; busy = true; message = "Checking MIDI destination…"
+        var command: [String: Any] = ["action": "plan", "path": source.path]
+        if let directory = directory { command["directory"] = directory.path }
+        send(command)
+    }
+
+    func chooseDestination() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose MIDI Output Folder"
+        panel.prompt = "Use This Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = destination?.deletingLastPathComponent() ?? source?.deletingLastPathComponent()
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            if response == .OK, let folder = panel.url { self.planOutput(directory: folder) }
+        }
+    }
+
+    func transcribe() {
+        guard !busy, !setup, let source = source, let destination = destination else { return }
+        result = nil; error = ""; warning = ""; busy = true
         message = "Reading audio…"; progress = nil; beginActivity()
-        send(["action": "transcribe", "path": url.path])
+        send(["action": "transcribe", "path": source.path, "destination": destination.path])
     }
 
     func save() {
@@ -184,18 +250,19 @@ final class AppState: ObservableObject {
                 if destination.standardizedFileURL != source.standardizedFileURL {
                     try Data(contentsOf: source).write(to: destination, options: .atomic)
                 }
-                self.result = destination; self.needsSave = false
+                self.result = destination; self.destination = destination; self.needsSave = false; self.error = ""
             } catch { self.error = "The MIDI couldn’t be saved there. Try another folder or check free disk space." }
         }
     }
 
     func reveal() { if let result = result { NSWorkspace.shared.activateFileViewerSelecting([result]) } }
-    func another() { result = nil; filename = ""; error = ""; warning = ""; message = "" }
+    func another() { result = nil; source = nil; destination = nil; filename = ""; error = ""; warning = ""; message = ""; needsSave = false }
     func retry() {
         error = ""
         if worker == nil || !(worker?.isRunning ?? false) { started = false; start() }
         else if setup { prepare() }
-        else { another() }
+        else if source != nil && destination == nil { planOutput() }
+        else if source != nil && result == nil { transcribe() }
     }
     func stop() {
         input?.closeFile(); input = nil
@@ -238,80 +305,146 @@ final class AppState: ObservableObject {
 struct ContentView: View {
     @ObservedObject var state: AppState
     @State private var hovering = false
+
+    func pathLabel(_ path: String) -> some View {
+        Text(path).font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary).textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     var body: some View {
-        VStack(spacing: 22) {
-            Text(state.result == nil ? "AUDIO → MIDI" : "Complete")
-                .font(.system(size: 25, weight: .semibold, design: .rounded))
-            if state.setup && !state.busy {
-                VStack(spacing: 14) {
-                    Text("One-time model setup").font(.headline)
-                    if state.authenticated {
-                        Text("Hugging Face is connected. Resume downloading MuScriptor Large.")
-                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        Button("Retry Download") { state.prepare() }.buttonStyle(.borderedProminent)
-                    } else {
-                    Text("Accept the Large model terms on Hugging Face, then paste a read token from that account.")
-                        .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("AUDIO → MIDI").font(.system(size: 25, weight: .semibold, design: .rounded))
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Link("Model terms", destination: URL(string: "https://huggingface.co/MuScriptor/muscriptor-large")!)
-                        Text("·").foregroundStyle(.secondary)
-                        Link("Get a read token", destination: URL(string: "https://huggingface.co/settings/tokens")!)
+                        Text("Model").font(.headline)
+                        Spacer()
+                        Text(state.cachedModels[state.selectedModel] == true ? "Downloaded" : "Download required")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    SecureField("Hugging Face read token", text: $state.token).textFieldStyle(.roundedBorder).onSubmit { state.connect() }
-                    Button("Connect & Download Large") { state.connect() }.buttonStyle(.borderedProminent).disabled(state.token.isEmpty)
-                    }
-                    Text("Downloads once. Your audio always stays on this Mac.").font(.caption).foregroundStyle(.secondary)
+                    Picker("Model", selection: Binding(get: { state.selectedModel }, set: { state.selectModel($0) })) {
+                        Text("Small").tag("small")
+                        Text("Medium").tag("medium")
+                        Text("Large").tag("large")
+                    }.pickerStyle(.segmented).labelsHidden().disabled(state.busy)
+                    Text("Small uses less memory · Medium balances size and accuracy · Large favors accuracy")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-            } else if let result = state.result {
-                Image(systemName: "checkmark.circle.fill").font(.system(size: 42)).foregroundStyle(.green)
-                Text(result.lastPathComponent).font(.headline).lineLimit(2).textSelection(.enabled)
-                HStack {
-                    Button("Save MIDI") { state.save() }.buttonStyle(.borderedProminent)
-                    Button("Reveal in Finder") { state.reveal() }
-                }
-                Button("Convert Another") { state.another() }.buttonStyle(.plain).foregroundStyle(.secondary)
-            } else if state.busy {
-                if !state.filename.isEmpty { Text(state.filename).font(.headline).lineLimit(2) }
-                Text(state.message).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                if let progress = state.progress {
-                    ProgressView(value: progress).tint(.accentColor)
-                    Text("\(Int(progress * 100))%").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                } else { ProgressView().controlSize(.small) }
-            } else {
-                Button { state.choose() } label: {
+
+                if state.busy {
                     VStack(spacing: 12) {
-                        Image(systemName: "waveform").font(.system(size: 32, weight: .light))
-                        Text("Drop an audio file here").font(.headline)
-                        Text("or click to choose").font(.subheadline).foregroundStyle(.secondary)
-                        Text("MP3 · WAV · FLAC · M4A / AAC").font(.caption).foregroundStyle(.tertiary)
-                    }.frame(maxWidth: .infinity).frame(height: 176)
-                    .background(hovering ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.025))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(hovering ? Color.accentColor : Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
-                    .contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
-                    guard let provider = providers.first else { return false }
-                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                        let url: URL?
-                        if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
-                        else { url = item as? URL }
-                        if let url = url { DispatchQueue.main.async { state.convert(url) } }
+                        if !state.filename.isEmpty { Text(state.filename).font(.headline).lineLimit(2) }
+                        Text(state.message).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        if let progress = state.progress {
+                            ProgressView(value: progress).tint(.accentColor)
+                            Text("\(Int(progress * 100))%").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        } else { ProgressView().controlSize(.small) }
+                    }.frame(maxWidth: .infinity).padding(.vertical, 18)
+                } else if let result = state.result {
+                    VStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill").font(.system(size: 36)).foregroundStyle(.green)
+                        Text("Transcription complete").font(.headline)
+                        Text(result.lastPathComponent).lineLimit(2).textSelection(.enabled)
+                        HStack {
+                            Button("Save MIDI Copy…") { state.save() }.buttonStyle(.borderedProminent)
+                            Button("Reveal in Finder") { state.reveal() }
+                        }
+                        Button("Convert Another") { state.another() }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity)
+                } else {
+                    if state.setup {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Set up MuScriptor \(state.modelName)").font(.headline)
+                            Text("Accept this model’s terms on Hugging Face. Each size needs its own acceptance; downloads are kept for future use.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            HStack {
+                                Link("\(state.modelName) model terms", destination: URL(string: "https://huggingface.co/MuScriptor/muscriptor-\(state.selectedModel)")!)
+                                Text("·").foregroundStyle(.secondary)
+                                Link("Get a read token", destination: URL(string: "https://huggingface.co/settings/tokens")!)
+                            }
+                            if state.authenticated {
+                                Button("Download \(state.modelName)") { state.prepare() }.buttonStyle(.borderedProminent)
+                            } else {
+                                SecureField("Hugging Face read token", text: $state.token).textFieldStyle(.roundedBorder).onSubmit { state.connect() }
+                                Button("Connect & Download \(state.modelName)") { state.connect() }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(state.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }.padding(16).background(Color.primary.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    return true
+                    if state.source != nil {
+                        HStack {
+                            Image(systemName: "waveform").font(.title2)
+                            Text(state.filename).font(.headline).lineLimit(2)
+                            Spacer()
+                            Button("Change Audio…") { state.choose() }
+                        }
+                    } else {
+                        Button { state.choose() } label: {
+                            VStack(spacing: 10) {
+                                Image(systemName: "waveform").font(.system(size: 30, weight: .light))
+                                Text("Drop an audio file here").font(.headline)
+                                Text("or click to choose").font(.subheadline).foregroundStyle(.secondary)
+                                Text("MP3 · WAV · FLAC · M4A / AAC").font(.caption).foregroundStyle(.tertiary)
+                            }.frame(maxWidth: .infinity).frame(height: 155)
+                            .background(hovering ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.025))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(hovering ? Color.accentColor : Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+                            .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
                 }
-            }
-            if !state.error.isEmpty {
-                VStack(spacing: 8) {
-                    Text(state.error).font(.subheadline).foregroundStyle(.red).multilineTextAlignment(.center)
-                    if !state.setup { Button("Try Again") { state.retry() } }
+
+                if let destination = state.destination {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(state.result == nil ? "MIDI destination" : "MIDI saved to").font(.headline)
+                            Spacer()
+                            if !state.busy && state.result == nil {
+                                Button("Change Folder…") { state.chooseDestination() }
+                            }
+                        }
+                        pathLabel(destination.path)
+                        if state.result == nil {
+                            Text("Existing files are kept. A number is added if this name is taken.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.padding(14).background(Color.primary.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 12))
+                    if !state.busy && state.result == nil {
+                        Button("Transcribe with \(state.modelName)") { state.transcribe() }
+                            .buttonStyle(.borderedProminent).controlSize(.large).disabled(state.setup)
+                    }
                 }
+
+                if !state.error.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(state.error).font(.subheadline).foregroundStyle(.red)
+                        Button("Try Again") { state.retry() }.disabled(state.busy)
+                    }
+                }
+                if !state.warning.isEmpty { Text(state.warning).font(.caption).foregroundStyle(.orange) }
+                Divider()
+                if !state.modelDirectory.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Model download folder").font(.caption).fontWeight(.medium)
+                        pathLabel(state.modelDirectory)
+                    }
+                }
+                Text("MuScriptor \(state.modelName) • \(state.backend) • Audio stays on this Mac")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(28)
+        }.frame(width: 560, height: 730)
+        .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
+            guard !state.busy, let provider = providers.first else { return false }
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url: URL?
+                if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
+                else { url = item as? URL }
+                if let url = url { DispatchQueue.main.async { state.convert(url) } }
             }
-            if !state.warning.isEmpty { Text(state.warning).font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center) }
-            Spacer(minLength: 0)
-            Text("MuScriptor Large • \(state.backend) • Local").font(.caption).foregroundStyle(.secondary)
+            return true
         }
-        .padding(34).frame(width: 470, height: 445)
         .onAppear { state.start() }
     }
 }
@@ -338,7 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit; menu.addItem(editItem); NSApp.mainMenu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 445), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "MuScriptor Local"
         window.contentView = NSHostingView(rootView: ContentView(state: state))
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)

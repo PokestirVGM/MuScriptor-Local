@@ -13,7 +13,7 @@ cp upstream/pyproject.toml upstream/README.md upstream/LICENSE "$APP/Contents/Re
 import plistlib, sys
 from pathlib import Path
 app, root = sys.argv[1:]
-info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='1', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='Local wrapper for MuScriptor by Kyutai and Mirelo. Model weights: CC BY-NC 4.0.')
+info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='2', CFBundleGetInfoString='1.0 Beta', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='Local wrapper for MuScriptor by Kyutai and Mirelo. Model weights: CC BY-NC 4.0.')
 Path(app, 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 PY
 /usr/bin/codesign --force --sign - "$APP"

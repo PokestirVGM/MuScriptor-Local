@@ -1,0 +1,12 @@
+[muscriptor] load audio: 0.00s
+[muscriptor] audio: 12.0s → 3 chunk(s) of 5.0s
+[muscriptor] build conditions: 0.09s
+[muscriptor] mel-spec (1 × 80000 samples): 0.013s
+[muscriptor] encode conditions (total): 0.017s
+[muscriptor] mel-spec (1 × 80000 samples): 0.001s
+[muscriptor] encode conditions (total): 0.002s
+[muscriptor] mel-spec (1 × 80000 samples): 0.001s
+[muscriptor] encode conditions (total): 0.002s
+[muscriptor] generate total: 2.11s
+[muscriptor] transcribe total: 2.30s (12.0s audio)
+{"models_switched": ["small", "medium", "large"], "actual_transcription_model": "large", "backend": "Apple MPS", "network_attempts": 0, "custom_destination_matches_preview": true, "chunks": 3, "notes": 20, "midi_seconds": 11.2298895, "warnings": []}

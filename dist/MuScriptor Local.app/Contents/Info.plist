@@ -6,6 +6,8 @@
 	<string>MuScriptor Local</string>
 	<key>CFBundleExecutable</key>
 	<string>MuScriptor Local</string>
+	<key>CFBundleGetInfoString</key>
+	<string>1.0 Beta</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.muscriptor.desktop</string>
 	<key>CFBundleName</key>
@@ -15,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>

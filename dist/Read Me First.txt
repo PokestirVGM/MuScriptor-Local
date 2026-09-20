@@ -3,10 +3,15 @@ MuScriptor Local — Apple Silicon
 1. Unzip “MuScriptor Local - Apple Silicon.zip”.
 2. Move “MuScriptor Local.app” into your Applications folder and open it.
 3. Let the app install its private Python environment. Internet is needed once.
-4. Accept the Large model terms at https://huggingface.co/MuScriptor/muscriptor-large.
+4. Choose Small, Medium, or Large. Open its model terms link and accept the terms.
 5. Create a Hugging Face read token at https://huggingface.co/settings/tokens.
-6. Paste that token into the app, then click Connect & Download Large.
-7. Drag in audio and get MIDI. After installation and model download, it works offline.
+6. Paste that token into the app, then click Connect & Download for your model.
+7. Drag in audio, review the MIDI destination, and use Change Folder if needed.
+8. Click Transcribe. After installation and model download, it works offline.
+
+Your model choice is remembered. Switch sizes whenever the app is idle; each
+size needs its own license acceptance and download. The download folder is
+shown directly in the app. Downloaded models stay cached when you switch.
 
 This is a personal, locally signed app, not an Apple-notarized commercial release.
 macOS may require you to explicitly approve opening it in System Settings →
@@ -23,12 +28,13 @@ Audio and inference stay on your Mac; Hugging Face is used only for setup/downlo
 
 Environment: ~/Library/Application Support/MuScriptor Local/Engine/
 Fallback MIDI files: ~/Library/Application Support/MuScriptor Local/Results/
-Model cache: ~/.cache/huggingface/hub/models--MuScriptor--muscriptor-large/
+Model cache: ~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/
 Logs: ~/Library/Logs/MuScriptor Local/ (also available in the app menu)
 
 Repair Dependencies in the app menu can repeat setup if something is missing.
 To update this shared copy, quit, replace the app with a newer shared version,
-then choose Repair Dependencies to refresh its private engine from that version.
+and reopen it. The app refreshes its local worker automatically. Use Repair
+Dependencies if the update also needs a refreshed Python environment.
 To uninstall: quit, trash the app and its Engine folder. Save any MIDI files in
 Results before removing that folder. Optionally remove the model cache above.
 Do not remove unrelated Hugging Face caches or shared credentials.
