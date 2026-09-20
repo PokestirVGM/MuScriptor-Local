@@ -2,14 +2,14 @@
 
 A desktop app for turning audio into MIDI with the official [MuScriptor](https://github.com/muscriptor/muscriptor) engine. Transcription runs locally on your computer. This is an independent community wrapper, not an official Kyutai or Mirelo application.
 
-**[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
+**[Download Windows 1.0 Beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1)** · **[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.2)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
 ## Platform status
 
 | Platform | Status |
 | --- | --- |
 | macOS 14+ on Apple Silicon | Public 1.0 beta |
-| Windows 10/11 x64 | [Development preview](https://github.com/PokestirVGM/MuScriptor-Local/tree/codex/windows-preview); hardware validation pending |
+| Windows 10/11 x64 | [1.0 Beta — installation and limitations](WINDOWS.md) |
 | Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
 ## Install on macOS
@@ -84,6 +84,9 @@ To update, quit the app, replace it with a newer release, and reopen it. The por
 To uninstall, quit and trash the app, then remove its private engine folder if no longer needed. Save any recovered MIDI files before deleting Results. Model caches and credentials are shared with other Hugging Face tools; remove only files you recognize and no longer need. MIDI saved elsewhere is unaffected.
 
 ## Development
+
+**Use `main` on both Mac and Windows.** Both interfaces and the shared worker live in this branch. The previous `codex/windows-preview` work was merged; do not use it as the starting point for new changes. Release tags preserve published builds, which can have an older UI than current source. Pull `main` before starting on another computer and push a reviewed change before switching machines.
+
 
 The macOS interface is Swift/AppKit/SwiftUI; the worker is Python. The pinned upstream revision is recorded in `upstream-revision.txt`, and the macOS environment uses `requirements.lock`.
 

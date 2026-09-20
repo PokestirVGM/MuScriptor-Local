@@ -100,11 +100,12 @@ class MainWindow(QMainWindow):
         self.destination = None
         self.result = None
         self.closing = False
+        self.dependency_failed = False
         self.instrument_groups = []
         self.selected_instruments = []
         self.soundfont = None
         self.ab_result = None
-        self.setWindowTitle("MuScriptor Local — Windows Preview")
+        self.setWindowTitle("MuScriptor Local — Windows 1.0 Beta")
         self.resize(560, 760)
         self.setMinimumSize(520, 600)
         self.setAcceptDrops(True)
@@ -398,7 +399,7 @@ class MainWindow(QMainWindow):
         self.setup_widget.setVisible(self.setup and not self.busy and self.result is None)
         self.setup_heading.setText("Set up MuScriptor " + self.model.currentData().title())
         self.token.setVisible(not self.authenticated)
-        self.download_button.setText(("Download " if self.authenticated else "Connect & Download ") + self.model.currentData().title())
+        self.download_button.setText(("Download " if self.authenticated else "Connect and Download ") + self.model.currentData().title())
         self.folder_button.setVisible(self.source is not None and self.result is None and not self.busy)
         self.output_widget.setVisible(self.destination is not None)
         self.output_path.setText(str(self.destination or ""))
@@ -594,6 +595,8 @@ class MainWindow(QMainWindow):
         elif kind == "warning":
             self.warning.setText("\n\n".join(filter(None, (self.warning.text(), event["message"]))))
         elif kind == "error":
+            if event.get("code") == "dependencies":
+                self.dependency_failed = True
             if event.get("code") == "auth":
                 self.authenticated = False
                 self.setup = True
@@ -602,6 +605,7 @@ class MainWindow(QMainWindow):
 
     def fail(self, message):
         self.busy = False
+        self.status.setText("Action needed")
         self.error.setText(message)
         self.refresh()
 
@@ -683,7 +687,9 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def retry(self):
-        if self.worker is None or self.worker.state() == QProcess.NotRunning:
+        if self.dependency_failed:
+            self.repair()
+        elif self.worker is None or self.worker.state() == QProcess.NotRunning:
             self.start()
         elif self.setup:
             self.download()
@@ -698,6 +704,7 @@ class MainWindow(QMainWindow):
         if sys.platform != "win32":
             self.fail("Use the macOS app to repair this Mac’s environment.")
             return
+        self.dependency_failed = True
         if self.worker:
             process, self.worker = self.worker, None
             process.kill()
@@ -720,9 +727,21 @@ class MainWindow(QMainWindow):
         self.installer = None
         if not self.closing:
             if code == 0:
+                self.dependency_failed = False
                 self.start()
             else:
-                self.fail("Setup failed. Check Internet access and App → Show Logs, then retry Repair Dependencies.")
+                message = "Engine setup did not finish. Try Again repairs the installation. Open App → Show Logs for details."
+                try:
+                    log = (self.support / "Logs/setup.log").read_text(errors="replace")[-65536:].lower()
+                    if "untrusted mount point" in log:
+                        message = "Windows blocked a Python version link. Install the latest app update, then choose Try Again."
+                    elif "no space left" in log or "not enough space" in log:
+                        message = "There is not enough disk space for the engine. Free some space, then choose Try Again."
+                    elif "access is denied" in log or "permission denied" in log:
+                        message = "Windows denied access to the engine folder. Check its permissions, then choose Try Again."
+                except OSError:
+                    pass
+                self.fail(message)
 
     def dragEnterEvent(self, event):
         if not self.busy and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():

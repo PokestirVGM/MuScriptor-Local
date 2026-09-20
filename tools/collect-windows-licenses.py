@@ -57,4 +57,4 @@ with tempfile.TemporaryDirectory() as temporary:
     '\n\nThe app uses separately distributed Qt DLLs in its _internal directory.\n'
     'Compatible rebuilt libraries can replace them; no check prevents replacement.\n'
     'The wrapper source and build scripts are available at:\n'
-    'https://github.com/PokestirVGM/MuScriptor-Local/tree/codex/windows-preview\n', encoding='utf-8')
+    'https://github.com/PokestirVGM/MuScriptor-Local/tree/main\n', encoding='utf-8')

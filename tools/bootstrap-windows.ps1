@@ -35,9 +35,15 @@ function Invoke-Uv {
 }
 Push-Location $Root
 try {
-    Invoke-Uv python install --no-bin 3.12
+    # Pin the patch version and use its real directory. Minor-version junctions
+    # can fail under Windows RedirectionGuard (ERROR_UNTRUSTED_MOUNT_POINT).
+    # Keep this private runtime out of system Python registration as well.
+    $pythonVersion = '3.12.14'
+    Invoke-Uv python install --no-bin --no-registry $pythonVersion
+    $basePython = "$Root/runtime/python/cpython-$pythonVersion-windows-x86_64-none/python.exe"
+    if (!(Test-Path $basePython)) { throw 'The private Python runtime is missing.' }
     $python = "$Root/.venv/Scripts/python.exe"
-    if (!(Test-Path $python)) { Invoke-Uv venv --python 3.12 .venv }
+    if (!(Test-Path $python)) { Invoke-Uv venv --python $basePython .venv }
     if ($Compute -eq 'auto') {
         # Presence is only an installation hint; the worker verifies actual CUDA usability.
         $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
@@ -49,9 +55,9 @@ try {
     Invoke-Uv pip install --python $python --index-url $index torch==2.7.1 torchaudio==2.7.1
     # Constraints prevent upstream dependency resolution from replacing the selected GPU build.
     @('torch==2.7.1', 'torchaudio==2.7.1') | Set-Content "$Root/runtime/torch-constraints.txt"
-    Invoke-Uv pip install --python $python --constraint "$Root/runtime/torch-constraints.txt" -r requirements-windows.txt
+    Invoke-Uv pip install --python $python --constraint runtime/torch-constraints.txt -r requirements-windows.txt ./upstream
     Invoke-Uv pip check --python $python
-    & $python -c 'import torch, muscriptor, imageio_ffmpeg; print("CUDA available:", torch.cuda.is_available())'
+    & $python -c "import torch, muscriptor, imageio_ffmpeg; print('CUDA available:', torch.cuda.is_available())"
     if ($LASTEXITCODE -ne 0) { throw 'The installed engine could not start.' }
     Invoke-Uv pip freeze --python $python | Set-Content "$Root/runtime/installed-packages.txt"
     Write-Output 'Local environment is ready.'

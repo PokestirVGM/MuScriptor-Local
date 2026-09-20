@@ -21,6 +21,12 @@ class MacOptionsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.folder = Path(self.tmp.name)
+        checkpoint = self.folder / "checkpoints/beat_this-final0.ckpt"
+        checkpoint.parent.mkdir()
+        checkpoint.touch()
+        cache = patch("torch.hub.get_dir", return_value=str(self.folder))
+        cache.start()
+        self.addCleanup(cache.stop)
         self.audio = self.folder / "song.wav"
         sf.write(self.audio, np.zeros(32000), 16000)
         self.events = []

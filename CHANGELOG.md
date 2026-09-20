@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0 Beta for Windows — 2026-09-20
+
+- Add a per-user Windows x64 setup installer and portable ZIP, with a redesigned MuScriptor Local desktop interface.
+- Display actual processor names and support Automatic, NVIDIA CUDA, and CPU selection.
+- Fix first-run setup in folders containing spaces, private Python version links, and incomplete-setup retries.
+- Keep optional tempo checkpoint downloads out of transcription so cached operation remains local and offline.
+- Validate Large on a physical RTX 5070 Ti and offline CPU, including complete MIDI output, Unicode destinations, and collision protection. Document untested configurations explicitly.
+- Preserve the existing macOS release at v1.0.0-beta.2.
+
 ## 1.0 Beta 2 — 2026-09-20
 
 - Publish installation-neutral documentation, privacy information, contribution guidance, and explicit wrapper/upstream license notices.

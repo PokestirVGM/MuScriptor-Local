@@ -22,8 +22,8 @@ Copy-Item WINDOWS.md 'build/windows/dist/MuScriptor Local/Read Me First.md' -For
 python tools/collect-windows-licenses.py 'build/windows/dist/MuScriptor Local/Legal'
 if ($LASTEXITCODE -ne 0) { throw 'Could not collect required license notices.' }
 New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
-Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor Local - Windows x64 Preview.zip' -Force
-Write-Output 'Built dist/windows/MuScriptor Local - Windows x64 Preview.zip'
+Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Portable.zip' -Force
+Write-Output 'Built the Windows 1.0 Beta portable archive.'
 
 $compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (!$compiler) {

@@ -427,6 +427,19 @@ class Engine:
             self.load()
         self.ready()
 
+    def beat_grid(self, wav, *, allow_download=False):
+        """Only explicit notation mode may fetch an uncached tempo helper."""
+        import torch
+        checkpoint = Path(torch.hub.get_dir()) / "checkpoints/beat_this-final0.ckpt"
+        if not checkpoint.is_file() and not allow_download:
+            logging.info("Optional tempo checkpoint is not cached; preserving note timing without a beat grid")
+            return None
+        try:
+            return self.model.detect_beat_grid_for((wav, 16000), "best-effort")
+        except Exception:
+            logging.exception("Optional upstream tempo detection unavailable")
+            return None
+
     def transcribe(self, source, destination=None, *, instruments=None, quantize=False, create_ab=False, soundfont=None):
         from muscriptor.events import ProgressEvent, NoteStartEvent
         from muscriptor.utils.audio import load_audio
@@ -461,11 +474,7 @@ class Engine:
             emit("status", message="Writing MIDI…")
             # Match upstream transcribe_and_postprocess while retaining progress.
             # Tempo failure must not make a valid transcription unusable offline.
-            try:
-                grid = self.model.detect_beat_grid_for((wav, 16000), "best-effort")
-            except Exception:
-                logging.exception("Optional upstream tempo detection unavailable")
-                grid = None
+            grid = self.beat_grid(wav, allow_download=quantize)
             if grid is not None:
                 grid = grid.with_onset_delay([ev.start_time for ev in events if isinstance(ev, NoteStartEvent)])
             quantized = quantize and grid is not None and grid.beat_subdivision is not None

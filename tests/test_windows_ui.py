@@ -187,6 +187,22 @@ class WindowsUITests(unittest.TestCase):
         self.assertEqual(self.window.result, original)
         self.assertEqual(original.read_bytes(), b'midi')
 
+    def test_dependency_error_retry_repairs_incomplete_environment(self):
+        self.window.receive(dict(type='error', code='dependencies', message='Incomplete engine'))
+        self.assertEqual(self.window.status.text(), 'Action needed')
+        with patch.object(self.window, 'repair') as repair, patch.object(self.window, 'start') as start:
+            self.window.retry()
+        repair.assert_called_once()
+        start.assert_not_called()
+
+    def test_setup_failure_does_not_leave_installing_status(self):
+        self.window.support = self.folder
+        self.window.status.setText('Installing private Python…')
+        self.window.setup_finished(1)
+        self.assertEqual(self.window.status.text(), 'Action needed')
+        self.assertIn('Try Again', self.window.error.text())
+        self.assertFalse(self.window.busy)
+
 
 if __name__ == '__main__':
     unittest.main()

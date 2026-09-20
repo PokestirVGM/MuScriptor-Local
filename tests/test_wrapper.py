@@ -182,6 +182,32 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(planned.parent, worker.SUPPORT / "Results")
             self.assertEqual(emitted.call_args.args, ("warning",))
 
+    def test_uncached_tempo_model_does_not_start_download(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        with patch('torch.hub.get_dir', return_value=str(self.folder / 'empty-torch-cache')):
+            self.assertIsNone(engine.beat_grid(object()))
+        engine.model.detect_beat_grid_for.assert_not_called()
+
+    def test_explicit_quantization_can_prepare_uncached_tempo_helper(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        wav = object()
+        with patch('torch.hub.get_dir', return_value=str(self.folder / 'empty-torch-cache')):
+            self.assertEqual(engine.beat_grid(wav, allow_download=True), engine.model.detect_beat_grid_for.return_value)
+        engine.model.detect_beat_grid_for.assert_called_once_with((wav, 16000), 'best-effort')
+
+    def test_cached_tempo_model_uses_upstream_processing(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        checkpoint = self.folder / 'checkpoints/beat_this-final0.ckpt'
+        checkpoint.parent.mkdir()
+        checkpoint.touch()
+        wav = object()
+        with patch('torch.hub.get_dir', return_value=str(self.folder)):
+            self.assertEqual(engine.beat_grid(wav), engine.model.detect_beat_grid_for.return_value)
+        engine.model.detect_beat_grid_for.assert_called_once_with((wav, 16000), 'best-effort')
+
     def test_automatic_processor_uses_largest_gpu_or_cpu(self):
         devices = [dict(id="cpu", memory_bytes=64), dict(id="cuda:0", memory_bytes=8), dict(id="cuda:1", memory_bytes=24)]
         self.assertEqual(worker.choose_device(devices), "cuda:1")
