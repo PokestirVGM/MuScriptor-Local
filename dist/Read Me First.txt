@@ -1,43 +1,40 @@
-MuScriptor Local — Apple Silicon
+MuScriptor Local 1.0 Beta — Apple Silicon
 
-1. Unzip “MuScriptor Local - Apple Silicon.zip”.
-2. Move “MuScriptor Local.app” into your Applications folder and open it.
-3. Let the app install its private Python environment. Internet is needed once.
-4. Choose Small, Medium, or Large. Open its model terms link and accept the terms.
-5. Create a Hugging Face read token at https://huggingface.co/settings/tokens.
-6. Paste that token into the app, then click Connect & Download for your model.
-7. Drag in audio, review the MIDI destination, and use Change Folder if needed.
-8. Click Transcribe. After installation and model download, it works offline.
+Download official release assets from:
+https://github.com/PokestirVGM/MuScriptor-Local/releases
 
-Your model choice is remembered. Switch sizes whenever the app is idle; each
-size needs its own license acceptance and download. The download folder is
-shown directly in the app. Downloaded models stay cached when you switch.
+1. Unzip the archive and move MuScriptor Local.app into Applications.
+2. Open it and let the private Python environment finish installing.
+3. Choose Small, Medium, or Large. Open that model's terms link and accept it.
+4. Create a read token at https://huggingface.co/settings/tokens.
+5. Paste the token into the app and choose Connect & Download.
+6. Drop in audio, review the MIDI destination, and change the folder if needed.
+7. Click Transcribe. Cached models work offline after setup.
 
-This is a personal, locally signed app, not an Apple-notarized commercial release.
-macOS may require you to explicitly approve opening it in System Settings →
-Privacy & Security. Only open a copy received from someone you trust.
+Requires an Apple Silicon Mac with macOS 14 or later. Model memory requirements
+vary by size. Allow roughly 10 GB for setup with Large, plus room for your audio
+and additional models. Performance and transcription accuracy vary.
 
-Requires an Apple Silicon Mac running macOS 14 or later. Large is a substantial
-model; the tested machine has 64 GB memory. Expect slower performance on smaller
-Macs. Allow roughly 10 GB of free disk space for the environment, model and setup.
+This beta is locally signed, not Apple-notarized. macOS may require approval in
+System Settings > Privacy & Security. Obtain the app from the release page above.
 
-Your own Hugging Face account/license acceptance is required. Model use is
-non-commercial under CC BY-NC 4.0 plus the conditions on the model page.
-No credentials, model weights, recordings, or MIDI files are included in this zip.
-Audio and inference stay on your Mac; Hugging Face is used only for setup/download.
+Your audio stays on your computer. Each model size needs its own Hugging Face
+access and terms acceptance. Downloads display their actual local folder.
+No credentials, recordings, MIDI files, or model weights are included.
 
-Environment: ~/Library/Application Support/MuScriptor Local/Engine/
-Fallback MIDI files: ~/Library/Application Support/MuScriptor Local/Results/
-Model cache: ~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/
-Logs: ~/Library/Logs/MuScriptor Local/ (also available in the app menu)
+Wrapper code: MIT. Official MuScriptor code: MIT, copyright Kyutai x Mirelo.
+Model weights: CC BY-NC 4.0 plus the model owner's additional terms.
+The wrapper license does not grant rights to the models or to input audio.
+License and attribution files are included in the archive's Legal folder.
+This is an independent community wrapper, not an official upstream application.
 
-Repair Dependencies in the app menu can repeat setup if something is missing.
-To update this shared copy, quit, replace the app with a newer shared version,
-and reopen it. The app refreshes its local worker automatically. Use Repair
-Dependencies if the update also needs a refreshed Python environment.
-To uninstall: quit, trash the app and its Engine folder. Save any MIDI files in
-Results before removing that folder. Optionally remove the model cache above.
-Do not remove unrelated Hugging Face caches or shared credentials.
+Private engine: ~/Library/Application Support/MuScriptor Local/Engine/
+Recovered MIDI: ~/Library/Application Support/MuScriptor Local/Results/
+Logs: ~/Library/Logs/MuScriptor Local/ (also available through Show Logs)
 
-Official engine: https://github.com/muscriptor/muscriptor (MIT code license).
-The bundled official source and its license are inside the application Resources.
+To update, quit, replace the app with a newer release, and reopen it.
+Repair Dependencies repeats environment setup if needed. To uninstall, trash
+the app and remove its private engine folder. Save recovered MIDI before removing
+Results. Remove model caches only if they are not needed by other software.
+
+Full documentation: https://github.com/PokestirVGM/MuScriptor-Local

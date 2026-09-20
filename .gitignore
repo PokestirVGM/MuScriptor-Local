@@ -11,3 +11,10 @@ validation/*.aac
 validation/*.flac
 validation/*.mid
 dist/windows/
+.DS_Store
+dist/*.app/
+dist/*.zip
+dist/Legal/
+validation/*-run.txt
+validation/wrapper-tests.txt
+validation/portable-install.txt

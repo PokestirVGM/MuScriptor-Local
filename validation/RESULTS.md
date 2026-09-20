@@ -1,29 +1,19 @@
-# Validation on this Mac
+# Release validation
 
-Machine: Apple Silicon MacBook Pro, macOS 26.6.2, 64 GB memory (user supplied).
-Engine: official MuScriptor 0.3.0, source revision `7f213afecf23bd6a1b8672aa223690ee9807cefb`.
-Python 3.12.14, PyTorch 2.14.0, native ARM64 FFmpeg 7.1.
+## macOS 1.0 beta
 
-Completed checks:
+Validated on Apple Silicon with macOS 14+ as the app's deployment target. Other Mac configurations have not been independently validated.
 
-- Inspected upstream README, Python model API, MIDI writer, audio loader, HTTP server and installed CLI help before implementation.
-- Native application compiled, ad-hoc signed, installed in the user's Applications folder and launched through macOS.
-- The running app reports **MuScriptor Large • Apple MPS • Local**. Independent PyTorch tensor arithmetic completed on `mps:0` outside the command sandbox.
-- All sixteen wrapper tests pass (rerun for 1.0 Beta). These decode actual stereo 44.1 kHz WAV, MP3, FLAC, M4A and AAC, confirm upstream's mono 16 kHz output, check corrupt-file errors, cleanup after success/failure, disk-space errors, collision-safe saving, permission fallback and device-error classification.
-- Hugging Face login/license access succeeded through the native secure field. Credentials were stored with owner-only permissions; the token was not sent through chat or command arguments.
-- The initial Xet download failed at Hugging Face's CDN. Replaced it with the official Hub client's HTTP transport and verified live byte-based progress in the app. Partial Xet data was automatically removed by Hub; the failed-session log was cleaned up.
-- The portable app's bootstrap was run in a fresh temporary directory and installed all 55 compatible dependencies. The official MuScriptor API and bundled FFmpeg were then imported/run successfully from that fresh environment. That disposable installation has been removed.
-- The share archive has no embedded local installation path and contains no credentials, model checkpoint, Python environment, or personal audio. Hardware compatibility beyond this Mac has not been tested.
+- The native application compiled, was locally signed, and opened successfully.
+- All 16 wrapper checks passed for the macOS beta. Coverage includes real audio decoding/cleanup, separate model caches, selected-model loading, download metadata, output previews/custom folders, disk errors, collision-safe saving, and CPU fallback classification.
+- The official Large checkpoint's bytes matched the Hub blob hash; see `model-integrity.txt`.
+- A real worker-protocol test switched Small → Medium → Large, planned a custom destination, and transcribed a complete original 12-second melody with Large on Apple MPS. It produced 20 MIDI note-on events over three chunks, with zero network attempts and no warnings. The saved path matched the preview. See `model-controls-results.json`.
+- Small/Medium routing was tested, but actual transcription with those checkpoints has not been validated.
+- A fresh portable environment installed successfully and imported the official engine and bundled FFmpeg.
+- The portable archive has no checkout-specific installation path, authentication files, recordings, or model weights.
 
-## 1.0 Beta model and output controls
+Local raw logs are not distributed because they may contain machine-specific paths. `make_audio.py` generates the original test melody. `validate_controls.py` reruns the offline integration check after its model and audio prerequisites are available.
 
-- Rebuilt the native app and checked its model selector and readable cache path in the running macOS window.
-- All sixteen wrapper tests pass, including separate caches for Small/Medium/Large, environment-specific cache paths, same-revision config/weights, selected-model loading, download progress metadata, releasing the previous model on a switch, output previews, custom output folders, collision handling, and inaccessible-folder fallback.
-- `validate_controls.py` exercised the real worker protocol: Small → Medium → Large, destination planning, then a complete offline Large transcription into a custom folder. Network calls were prohibited with a Python audit hook.
-- The original 12-second test melody completed all three chunks on Apple MPS, producing 20 note-on events and 11.2298895 seconds of MIDI. The actual output matched the preview, with zero network attempts and no warnings. Temporary validation files were removed after checking.
-- Large's 5,465,642,136-byte checkpoint matched the official Hub blob SHA-256 (see `model-integrity.txt`).
-- Small and Medium repository routing and switching were tested; their actual checkpoints have not been downloaded or transcribed on this Mac. They require separate model-term acceptance.
+## Windows
 
-Supporting records for this release: `model-controls-results.json`, `model-controls-run.txt`, and `wrapper-tests.txt`.
-
-Supporting records: `wrapper-tests.txt`, `portable-install.txt`; original test melody source: `make_audio.py`.
+The Windows implementation lives on the development branch. Its build and unit checks do not substitute for validation on a Windows PC with the intended GPU. See that branch's Windows documentation for the current test scope.
