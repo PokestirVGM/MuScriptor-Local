@@ -1,0 +1,35 @@
+$ErrorActionPreference = 'Stop'
+Set-Location (Split-Path $PSScriptRoot -Parent)
+if (!(Test-Path 'upstream/muscriptor/transcription_model.py')) {
+    git clone https://github.com/muscriptor/muscriptor.git upstream
+    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch official MuScriptor source.' }
+}
+$revision = (Get-Content upstream-revision.txt -Raw).Trim()
+git -C upstream checkout $revision
+if ($LASTEXITCODE -ne 0) { throw 'Could not select the pinned official source revision.' }
+python -m pip install -r requirements-windows-ui.txt
+if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
+    --add-data "$PWD/src/worker.py;resources/src" `
+    --add-data "$PWD/tools/bootstrap-windows.ps1;resources/tools" `
+    --add-data "$PWD/requirements-windows.txt;resources" `
+    --add-data "$PWD/upstream/muscriptor;resources/upstream/muscriptor" `
+    --add-data "$PWD/upstream/pyproject.toml;resources/upstream" `
+    --add-data "$PWD/upstream/README.md;resources/upstream" `
+    --add-data "$PWD/upstream/LICENSE;resources/upstream" src/WindowsApp.py
+if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+Copy-Item WINDOWS.md 'build/windows/dist/MuScriptor Local/Read Me First.md' -Force
+python tools/collect-windows-licenses.py 'build/windows/dist/MuScriptor Local/Legal'
+if ($LASTEXITCODE -ne 0) { throw 'Could not collect required license notices.' }
+New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Portable.zip' -Force
+Write-Output 'Built the Windows 1.0 Beta portable archive.'
+
+$compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+if (!$compiler) {
+    $candidate = "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+    if (Test-Path $candidate) { $compiler = $candidate }
+}
+if (!$compiler) { throw 'Install Inno Setup 6 to build the setup installer.' }
+& $compiler 'tools/windows-installer.iss'
+if ($LASTEXITCODE -ne 0) { throw 'Windows installer build failed.' }

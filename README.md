@@ -2,14 +2,14 @@
 
 A desktop app for turning audio into MIDI with the official [MuScriptor](https://github.com/muscriptor/muscriptor) engine. Transcription runs locally on your computer. This is an independent community wrapper, not an official Kyutai or Mirelo application.
 
-**[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
+**[Download Windows 1.0 Beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1)** · **[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.2)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
 ## Platform status
 
 | Platform | Status |
 | --- | --- |
 | macOS 14+ on Apple Silicon | Public 1.0 beta |
-| Windows 10/11 x64 | [Development preview](https://github.com/PokestirVGM/MuScriptor-Local/tree/codex/windows-preview); hardware validation pending |
+| Windows 10/11 x64 | [1.0 Beta — installation and limitations](WINDOWS.md) |
 | Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
 ## Install on macOS

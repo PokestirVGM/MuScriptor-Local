@@ -123,7 +123,9 @@ class WrapperTests(unittest.TestCase):
         engine = worker.Engine.__new__(worker.Engine)
         engine.model = object()
         engine.model_size = "large"
-        engine.device = "cpu"
+        engine.device = "mps"
+        engine.devices = [{"id": "mps", "backend": "Apple MPS", "name": "Apple"}, {"id": "cpu", "backend": "CPU", "name": "CPU"}]
+        engine.requested_device = "auto"
         engine.ready = Mock()
         with patch("torch.backends.mps.is_available", return_value=True), patch("torch.mps.empty_cache") as clear, patch.object(worker, "get_weights") as download, patch.object(worker, "emit"):
             engine.select("small")
@@ -142,6 +144,8 @@ class WrapperTests(unittest.TestCase):
         engine.model = None
         engine.model_size = "medium"
         engine.device = "cpu"
+        engine.devices = [{"id": "cpu", "backend": "CPU", "name": "CPU"}]
+        engine.requested_device = "auto"
         model = Mock()
         parameter = Mock()
         parameter.device.type = "cpu"
@@ -177,6 +181,71 @@ class WrapperTests(unittest.TestCase):
             planned = worker.planned_output(self.wav)
             self.assertEqual(planned.parent, worker.SUPPORT / "Results")
             self.assertEqual(emitted.call_args.args, ("warning",))
+
+    def test_uncached_tempo_model_does_not_start_download(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        with patch('torch.hub.get_dir', return_value=str(self.folder / 'empty-torch-cache')):
+            self.assertIsNone(engine.beat_grid(object()))
+        engine.model.detect_beat_grid_for.assert_not_called()
+
+    def test_cached_tempo_model_uses_upstream_processing(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        checkpoint = self.folder / 'checkpoints/beat_this-final0.ckpt'
+        checkpoint.parent.mkdir()
+        checkpoint.touch()
+        wav = object()
+        with patch('torch.hub.get_dir', return_value=str(self.folder)):
+            self.assertEqual(engine.beat_grid(wav), engine.model.detect_beat_grid_for.return_value)
+        engine.model.detect_beat_grid_for.assert_called_once_with((wav, 16000), 'best-effort')
+
+    def test_automatic_processor_uses_largest_gpu_or_cpu(self):
+        devices = [dict(id="cpu", memory_bytes=64), dict(id="cuda:0", memory_bytes=8), dict(id="cuda:1", memory_bytes=24)]
+        self.assertEqual(worker.choose_device(devices), "cuda:1")
+        self.assertEqual(worker.choose_device(devices, "cpu"), "cpu")
+        self.assertEqual(worker.choose_device(devices, "cuda:0"), "cuda:0")
+        self.assertEqual(worker.choose_device(devices[:1]), "cpu")
+        with self.assertRaises(worker.UserError):
+            worker.choose_device(devices, "cuda:3")
+
+    def test_cuda_failures_are_distinct_from_audio_errors(self):
+        self.assertTrue(worker.device_error(RuntimeError("CUDA out of memory"), "cuda:1"))
+        self.assertTrue(worker.device_error(RuntimeError("no kernel image is available"), "cuda:0"))
+        self.assertFalse(worker.device_error(RuntimeError("invalid audio"), "cuda:0"))
+        self.assertFalse(worker.device_error(OSError("CUDA file missing"), "cuda:0"))
+        self.assertFalse(worker.device_error(RuntimeError("out of memory"), "cpu"))
+
+    def test_device_report_names_actual_gpu_and_memory(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.device = "cuda:1"
+        engine.requested_device = "auto"
+        engine.devices = [dict(id="cuda:1", name="NVIDIA Test GPU", backend="NVIDIA CUDA", memory_bytes=24 * 1024**3, memory_kind="dedicated GPU memory")]
+        with patch.object(worker, "emit") as emit:
+            engine.device_event()
+            self.assertEqual(emit.call_args.kwargs["device_id"], "cuda:1")
+            self.assertIn("NVIDIA Test GPU", emit.call_args.kwargs["detail"])
+            self.assertIn("24 GB dedicated GPU memory", emit.call_args.kwargs["detail"])
+
+    def test_windows_app_data_location(self):
+        with patch.dict(worker.os.environ, {"LOCALAPPDATA": str(self.folder)}):
+            support, logs = worker.application_directories("Windows")
+            self.assertEqual(support, self.folder / "MuScriptor Local")
+            self.assertEqual(logs, support / "Logs")
+
+    def test_cuda_fallback_updates_actual_backend_to_cpu(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.device = "cuda:0"
+        engine.requested_device = "auto"
+        engine.devices = [dict(id="cpu", name="Test CPU", backend="CPU")]
+        engine.model = object()
+        engine.clear_device_cache = Mock()
+        with patch.object(worker, "emit") as emit:
+            engine.fallback()
+            self.assertIsNone(engine.model)
+            self.assertEqual(engine.device, "cpu")
+            reports = [call.kwargs for call in emit.call_args_list if call.args == ("backend",)]
+            self.assertEqual(reports[-1]["device_id"], "cpu")
 
 
 if __name__ == "__main__":

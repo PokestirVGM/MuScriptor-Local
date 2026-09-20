@@ -12,6 +12,7 @@ final class AppState: ObservableObject {
     @Published var filename = ""
     @Published var progress: Double? = nil
     @Published var backend = "Checking backend"
+    @Published var processorDetail = ""
     @Published var result: URL? = nil
     @Published var token = ""
     @Published var needsSave = false
@@ -124,7 +125,9 @@ final class AppState: ObservableObject {
 
     func receive(_ event: [String: Any]) {
         switch event["type"] as? String {
-        case "backend": backend = event["device"] as? String ?? "CPU"
+        case "backend":
+            backend = event["device"] as? String ?? "CPU"
+            processorDetail = event["detail"] as? String ?? ""
         case "ready":
             authenticated = event["authenticated"] as? Bool ?? authenticated
             setup = !(event["cached"] as? Bool ?? false)
@@ -433,6 +436,9 @@ struct ContentView: View {
                 }
                 Text("MuScriptor \(state.modelName) • \(state.backend) • Audio stays on this Mac")
                     .font(.caption).foregroundStyle(.secondary)
+                if !state.processorDetail.isEmpty {
+                    Text(state.processorDetail).font(.caption).foregroundStyle(.secondary)
+                }
             }.padding(28)
         }.frame(width: 560, height: 730)
         .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
