@@ -1,0 +1,40 @@
+name: Windows preview
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/windows-preview]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Windows app
+        shell: pwsh
+        run: ./tools/build-windows.ps1
+      - name: Test desktop states without model downloads
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -p test_windows_ui.py -v
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        run: |
+          $process = Start-Process 'build/windows/dist/MuScriptor Local/MuScriptor Local.exe' -ArgumentList '--smoke-test' -PassThru
+          if (!$process.WaitForExit(30000)) { $process.Kill(); throw 'App did not finish its startup check.' }
+          if ($process.ExitCode -ne 0) { throw 'App startup check failed.' }
+      - name: Install and test the Windows CPU worker
+        shell: pwsh
+        run: |
+          ./tools/bootstrap-windows.ps1 -Root "$env:RUNNER_TEMP/Engine" -Resources "$PWD" -Compute cpu
+          & "$env:RUNNER_TEMP/Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_wrapper.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Worker checks failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MuScriptor-Local-Windows-x64-Preview
+          path: dist/windows/*.zip

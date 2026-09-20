@@ -1,0 +1,4 @@
+# Engine extras; PyTorch and torchaudio are installed together by the bootstrap.
+# Resolve upstream's cross-platform dependencies rather than using the macOS lock.
+imageio-ffmpeg==0.6.0
+./upstream

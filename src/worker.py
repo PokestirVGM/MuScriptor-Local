@@ -9,6 +9,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import platform
 import re
 from pathlib import Path
 import shutil
@@ -31,8 +32,18 @@ REPO = "MuScriptor/muscriptor-large"
 MODELS = ("small", "medium", "large")
 # Conservative space allowances, including download overhead.
 MODEL_SPACE = {"small": 1024**3, "medium": 2 * 1024**3, "large": 7 * 1024**3}
-SUPPORT = Path.home() / "Library/Application Support/MuScriptor Local"
-LOG_DIR = Path.home() / "Library/Logs/MuScriptor Local"
+def application_directories(system=None):
+    system = system or platform.system()
+    if system == "Windows":
+        support = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "MuScriptor Local"
+        return support, support / "Logs"
+    if system == "Darwin":
+        return Path.home() / "Library/Application Support/MuScriptor Local", Path.home() / "Library/Logs/MuScriptor Local"
+    support = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "muscriptor-local"
+    return support, support / "Logs"
+
+
+SUPPORT, LOG_DIR = application_directories()
 protocol = sys.stdout
 
 
@@ -126,6 +137,7 @@ def decoded_audio(source):
                 [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-xerror",
                  "-i", str(source), "-map", "0:a:0", "-vn", "-c:a", "pcm_s24le", "-y", str(wav)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             try:
                 _, stderr = decoder.communicate()
@@ -153,22 +165,25 @@ def decoded_audio(source):
 def write_unique(directory, name, data):
     """Publish complete MIDI atomically without ever overwriting an existing file."""
     directory.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=directory, prefix=".muscriptor-", delete=False) as f:
-        temporary = Path(f.name)
-        try:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=".muscriptor-", delete=False) as f:
+            temporary = Path(f.name)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-            for index in range(10000):
-                suffix = "" if index == 0 else f" ({index + 1})"
-                target = directory / f"{name}{suffix}.mid"
-                try:
-                    os.link(temporary, target)
-                    return target
-                except FileExistsError:
-                    continue
-            raise UserError("Too many files have this name. Save to another folder.", "save")
-        finally:
+        # Close before linking/removing: Windows cannot unlink an open file.
+        for index in range(10000):
+            suffix = "" if index == 0 else f" ({index + 1})"
+            target = directory / f"{name}{suffix}.mid"
+            try:
+                os.link(temporary, target)
+                return target
+            except FileExistsError:
+                continue
+        raise UserError("Too many files have this name. Save to another folder.", "save")
+    finally:
+        if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
@@ -205,8 +220,62 @@ def mps_error(exc):
         word in str(exc).lower() for word in ("mps", "metal", "placeholder storage"))
 
 
+def device_error(exc, device):
+    if device == "mps":
+        return mps_error(exc)
+    return device.startswith("cuda") and isinstance(exc, (RuntimeError, NotImplementedError)) and any(
+        word in str(exc).lower() for word in ("cuda", "cublas", "cudnn", "no kernel image", "out of memory"))
+
+
+def system_memory():
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (name, ctypes.c_ulonglong) for name in ("total", "available", "page", "page_available", "virtual", "virtual_available", "extended")]
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            return status.total if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def device_inventory():
+    import torch
+    cpu = os.environ.get("PROCESSOR_IDENTIFIER") or platform.processor() or platform.machine()
+    if platform.system() == "Darwin":
+        try:
+            cpu = subprocess.check_output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    memory = system_memory()
+    devices = []
+    if torch.cuda.is_available():
+        for index in range(torch.cuda.device_count()):
+            properties = torch.cuda.get_device_properties(index)
+            devices.append(dict(id=f"cuda:{index}", name=properties.name, backend="NVIDIA CUDA",
+                                memory_bytes=properties.total_memory, memory_kind="dedicated GPU memory"))
+    if torch.backends.mps.is_available():
+        devices.append(dict(id="mps", name=cpu, backend="Apple MPS", memory_bytes=memory, memory_kind="shared unified memory"))
+    devices.append(dict(id="cpu", name=cpu, backend="CPU", memory_bytes=memory, memory_kind="system memory"))
+    return devices
+
+
+def choose_device(devices, requested="auto"):
+    if requested == "auto":
+        gpus = [device for device in devices if device["id"].startswith("cuda:")]
+        if gpus:
+            return max(gpus, key=lambda device: device["memory_bytes"] or 0)["id"]
+        return "mps" if any(device["id"] == "mps" for device in devices) else "cpu"
+    if not any(device["id"] == requested for device in devices):
+        raise UserError("That processor is not available. Choose Automatic or CPU.", "device")
+    return requested
+
+
 class Engine:
-    def __init__(self, model=MODEL):
+    def __init__(self, model=MODEL, device="auto"):
         import torch
         import imageio_ffmpeg
         import muscriptor
@@ -214,7 +283,14 @@ class Engine:
         import soundfile
         if not Path(imageio_ffmpeg.get_ffmpeg_exe()).is_file():
             raise UserError("The audio decoder is missing. Reinstall the app’s dependencies.", "dependencies")
-        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+        self.devices = device_inventory()
+        self.requested_device = device
+        try:
+            self.device = choose_device(self.devices, device)
+        except UserError:
+            self.requested_device = "auto"
+            self.device = choose_device(self.devices)
+            emit("warning", message="The previously selected processor is unavailable. Automatic selection is being used.")
         self.model = None
         model_repo(model)
         self.model_size = model
@@ -234,25 +310,48 @@ class Engine:
             import torch
             self.model = None
             gc.collect()
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
+            self.clear_device_cache()
             self.model_size = model
-            self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+            self.device = choose_device(self.devices, self.requested_device)
             self.device_event()
         self.ready()
 
     def device_event(self):
-        emit("backend", device="Apple MPS" if self.device == "mps" else "CPU")
+        device = next((item for item in self.devices if item["id"] == self.device), {"backend": "CPU", "name": "CPU"})
+        memory = device.get("memory_bytes")
+        detail = device["name"]
+        if memory:
+            detail += f" · {memory / 1024**3:.0f} GB {device['memory_kind']}"
+        emit("backend", device=device["backend"], device_id=self.device, detail=detail,
+             devices=self.devices, requested_device=self.requested_device)
+
+    def clear_device_cache(self):
+        import torch
+        if self.device == "mps" and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif self.device.startswith("cuda") and torch.cuda.is_available():
+            with torch.cuda.device(self.device):
+                torch.cuda.empty_cache()
+
+    def select_device(self, requested):
+        device = choose_device(self.devices, requested)
+        self.model = None
+        gc.collect()
+        self.clear_device_cache()
+        self.requested_device = requested
+        self.device = device
+        self.device_event()
+        self.ready()
 
     def fallback(self):
         import torch
         self.model = None
         gc.collect()
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
+        previous = self.device
+        self.clear_device_cache()
         self.device = "cpu"
         self.device_event()
-        emit("warning", message="Apple MPS could not complete this operation. Retrying locally on CPU; this will be slower.")
+        emit("warning", message=f"{'Apple MPS' if previous == 'mps' else 'NVIDIA CUDA'} could not complete this operation. Retrying locally on CPU; this will be slower.")
 
     def load(self):
         if self.model is not None:
@@ -263,7 +362,7 @@ class Engine:
         self.model = TranscriptionModel.load_model(path, device=self.device)
         actual = next(self.model._model.parameters()).device
         logging.info("Loaded official %s: parameter device=%s", self.model_size, actual)
-        if actual.type != self.device:
+        if actual.type != self.device.split(":")[0] or (self.device.startswith("cuda:") and actual.index != int(self.device.split(":")[1])):
             raise RuntimeError("Model did not load on the selected device")
         self.device_event()
 
@@ -271,7 +370,7 @@ class Engine:
         try:
             self.load()
         except Exception as exc:
-            if self.device != "mps" or not mps_error(exc):
+            if not device_error(exc, self.device):
                 raise
             logging.exception("MPS load failed")
             self.fallback()
@@ -303,7 +402,7 @@ class Engine:
                             events.append(event)
                     break
                 except Exception as exc:
-                    if self.device != "mps" or not mps_error(exc):
+                    if not device_error(exc, self.device):
                         raise
                     logging.exception("MPS transcription failed; restarting complete song on CPU")
                     events = []
@@ -364,7 +463,9 @@ def main():
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument("--model", choices=MODELS, default=MODEL)
-        engine = Engine(parser.parse_args().model)
+        parser.add_argument("--device", default="auto")
+        args = parser.parse_args()
+        engine = Engine(args.model, args.device)
         from huggingface_hub import get_token, login
         engine.ready()
     except Exception:
@@ -397,6 +498,8 @@ def main():
                 engine.prepare()
             elif action == "select_model":
                 engine.select(command["model"])
+            elif action == "select_device":
+                engine.select_device(command["device"])
             elif action == "plan":
                 source = Path(command["path"]).expanduser().resolve()
                 directory = Path(command["directory"]).expanduser().resolve() if command.get("directory") else None

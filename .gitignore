@@ -10,3 +10,4 @@ validation/*.m4a
 validation/*.aac
 validation/*.flac
 validation/*.mid
+dist/windows/
