@@ -2,6 +2,18 @@
 
 The Windows interface is being developed separately from the published macOS 1.0 Beta. It shares the official MuScriptor transcription engine and the model/output controls. This is an x64 Windows 10/11 preview; Windows ARM and AMD/Intel GPU acceleration are not included.
 
+## Interface alignment with macOS
+
+The Windows Qt interface now follows the macOS layout: a compact 560-pixel default width, segmented Small/Medium/Large selection, a dashed audio drop area, rounded options and output panels, and a completion view with Save MIDI Copy and Reveal in Explorer actions. Colors follow the light or dark palette at launch. The window can be resized, and the page scrolls for longer content and larger display scaling.
+
+Search **Instruments** to add supported upstream groups; click a selected item’s × to remove it. Empty means unrestricted detection. **Quantize MIDI for notation** and **Create A/B audio render** both start unchecked and use the same worker APIs as the Mac. Quantization uses upstream onset correction and beat-grid processing; if no usable subdivision is available, the app reports that performance timing was retained.
+
+A/B audio has original audio on the left and performance-timing MIDI synthesis on the right, even when the separately exported MIDI is quantized. Install FluidSynth for Windows, add the directory containing `fluidsynth.exe` to your user `PATH`, and reopen the app. Use **Choose SoundFont…** to select a local `.sf2` file. Rendering does not download a SoundFont. Missing dependencies or rendering failures preserve the completed MIDI and show a warning. Successful A/B audio gets its own saved-path display and Explorer button. Saving a MIDI copy does not move the A/B audio.
+
+**Processor settings** expands the Windows-specific Automatic/GPU/CPU selector; the actual backend and hardware remain visible below it. Model selection, local processing, download progress, safe output naming, repair, and process cleanup retain the existing Windows behavior.
+
+Headless Qt tests cover the controls and state transitions. Native Windows fonts, title bars, Explorer selection, high-DPI scaling, and actual GPU/transcription still need verification on a Windows PC; rendering Qt offscreen on macOS cannot establish those results.
+
 ## Processor display
 
 The app reports the actual backend and processor name. NVIDIA CUDA devices include their dedicated GPU memory; CPU mode reports system memory. Automatic chooses the available NVIDIA GPU with the most memory, or CPU when CUDA is unavailable. The Processor selector also allows a specific available GPU or CPU. Memory figures are total capacity, not an estimate of free space or whether a model will fit.

@@ -24,18 +24,40 @@ The app is locally signed, but **not Apple-notarized**. macOS may require approv
 
 Each model size needs its own terms acceptance and download. Large needs substantially more memory and disk space than Small. Allow roughly 10 GB for initial setup with Large; retaining multiple models needs additional space. Performance varies with hardware and recording length.
 
-## Transcribe audio
+## Transcribe audio on macOS
 
 1. Choose a model. The app remembers your choice and keeps downloaded models cached when you switch.
 2. Drop one audio file into the window, or click to choose it.
 3. Review the full **MIDI destination**. Use **Change Folder…** to select a different output folder.
-4. Click **Transcribe**. When it finishes, use **Save MIDI Copy…**, **Reveal in Finder**, or **Convert Another**.
+4. Optionally search the **Instruments** picker and add one or more groups. Remove a selected item with its × button. Leave the selection empty for unrestricted detection.
+5. Optionally enable **Quantize MIDI for notation** or **Create A/B audio render**. Both start unchecked.
+6. Click **Transcribe**. When it finishes, use **Save MIDI Copy…**, **Reveal in Finder**, or **Convert Another**. If A/B audio was created, its full saved path and a separate Finder button appear.
 
 The default output is `<song>_transcription.mid` beside the audio. Existing files are preserved; duplicates get a numbered name. If a folder becomes unavailable, the app attempts to keep the MIDI in its Results folder and opens a save dialog. Canceling that dialog keeps the recovered result.
 
 Model download progress shows bytes received and the actual cache folder as selectable text. Transcription progress follows the engine’s five-second chunks. Loading and final MIDI writing have an indeterminate indicator. Model switching is disabled while work is in progress. Closing the app stops its worker and cancels the current operation.
 
-WAV, MP3, FLAC, M4A/AAC, and other formats supported by the loader or FFmpeg are accepted. The official engine performs resampling and MIDI generation; the wrapper does not invent or edit notes. MIDI is produced without quantization. Transcription is approximate and may require editing, particularly for dense recordings.
+WAV, MP3, FLAC, M4A/AAC, and other formats supported by the loader or FFmpeg are accepted. The official engine performs resampling and MIDI generation; the wrapper does not invent or edit notes. MIDI retains performance timing by default. Both timing modes use upstream onset-delay correction when the engine finds enough beat/onset evidence. Transcription is approximate and may require editing, particularly for dense recordings.
+
+### Optional notation MIDI and A/B audio
+
+**Quantize MIDI for notation** uses MuScriptor’s beat-grid quantization. It works best with a steady tempo. If the engine cannot find a usable beat subdivision, the app saves performance-timing MIDI and shows a warning. The upstream tempo helper may need an initial download; once cached it runs locally. The wrapper does not invent a replacement grid or correction when upstream cannot measure one.
+
+**Create A/B audio render** uses upstream post-processing: original audio on the **left** and FluidSynth synthesis on the **right**, with upstream alignment and loudness matching. It uses onset-corrected performance timing for listening, including when the exported MIDI is quantized for notation. The Hugging Face transcription checkpoints do **not** include FluidSynth or a SoundFont.
+
+For A/B rendering on macOS:
+
+1. Install FluidSynth using Homebrew: `brew install fluidsynth`, then reopen the app. Finder launches also search `/opt/homebrew/bin` and `/usr/local/bin`.
+2. Download a local `.sf2` SoundFont, for example [MuScriptor’s MuseScore General asset](https://huggingface.co/MuScriptor/assets/blob/main/MuseScore_General.sf2).
+3. Enable **Create A/B audio render**, click **Choose SoundFont…**, and select that file. Rendering uses the selected local file; the app does not automatically download a SoundFont.
+
+The comparison is saved as `<MIDI name>_AB.wav` beside the actual saved MIDI, or in the app’s Results folder if that folder becomes unavailable. Existing audio files are preserved with numbered names. If FluidSynth, the SoundFont, or rendering fails, the completed MIDI remains available and the app shows recovery guidance. **Save MIDI Copy…** copies only the MIDI; the A/B path continues to identify the saved audio.
+
+### Upstream compatibility verified
+
+These macOS controls were checked against the official engine and the released [Small](https://huggingface.co/MuScriptor/muscriptor-small), [Medium](https://huggingface.co/MuScriptor/muscriptor-medium), and [Large](https://huggingface.co/MuScriptor/muscriptor-large) model cards. All three checkpoints use the shared instrument taxonomy. The app obtains picker entries from `MT3_FULL_PLUS_GROUP_NAMES` and passes exact names to the current `TranscriptionModel.transcribe(instruments=...)` API; older model-card examples use an earlier conditioning-string API.
+
+The pinned engine in `upstream-revision.txt` provides the supported APIs used here: [instrument groups](https://github.com/muscriptor/muscriptor/blob/7f213afecf23bd6a1b8672aa223690ee9807cefb/muscriptor/tokenizer/mt3.py), [beat detection, onset measurement, and MIDI export](https://github.com/muscriptor/muscriptor/blob/7f213afecf23bd6a1b8672aa223690ee9807cefb/muscriptor/transcription_model.py), and [A/B auralization](https://github.com/muscriptor/muscriptor/blob/7f213afecf23bd6a1b8672aa223690ee9807cefb/muscriptor/utils/auralization.py). Quantization and A/B rendering are engine post-processing of model events, not alternative inference implementations. The Windows preview now follows these controls and layout; see [Windows instructions](WINDOWS.md).
 
 ## Processing and privacy
 
@@ -69,7 +91,8 @@ Clone this repository, fetch the official upstream source into `upstream/` at th
 
 - `zsh tools/build.sh` builds a local launcher that points at the checkout.
 - `zsh tools/share.sh` creates a portable app and zip with no checkout-specific installation path.
-- `.venv/bin/python -m unittest discover -s tests -v` runs the wrapper checks.
+- `.venv/bin/python -m unittest discover -s tests -p 'test_wrapper.py' -v` runs the shared worker checks.
+- `.venv/bin/python -m unittest discover -s tests -p 'test_mac_options.py' -v` runs focused macOS option checks, including real upstream MIDI conversion and A/B processing with mocked inference/synthesis. Windows UI tests require a compatible Windows Qt environment.
 - `validation/validate_controls.py` exercises real model switching and offline Large transcription after the model is cached and the sample audio has been generated.
 
 Generated app bundles and archives belong in GitHub Releases, not source control. See [CONTRIBUTING.md](CONTRIBUTING.md) and [validation/RESULTS.md](validation/RESULTS.md) for validation scope and known limitations.
