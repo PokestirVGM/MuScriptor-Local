@@ -2,6 +2,18 @@
 
 An independent desktop wrapper for the official MuScriptor engine. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM and AMD/Intel GPU acceleration are not included.
 
+## Current development interface
+
+The source on `main` includes changes newer than the published Windows beta. The Windows Qt interface now follows the macOS layout: a compact 560-pixel default width, segmented Small/Medium/Large selection, a dashed audio drop area, rounded options and output panels, and a completion view with Save MIDI Copy and Reveal in Explorer actions. Colors follow the light or dark palette at launch. The window can be resized, and the page scrolls for longer content and larger display scaling.
+
+Search **Instruments** to add supported upstream groups; click a selected item’s × to remove it. Empty means unrestricted detection. **Quantize MIDI for notation** and **Create A/B audio render** both start unchecked and use the same worker APIs as the Mac. Quantization uses upstream onset correction and beat-grid processing; if no usable subdivision is available, the app reports that performance timing was retained.
+
+A/B audio has original audio on the left and performance-timing MIDI synthesis on the right, even when the separately exported MIDI is quantized. Install FluidSynth for Windows, add the directory containing `fluidsynth.exe` to your user `PATH`, and reopen the app. Use **Choose SoundFont…** to select a local `.sf2` file. Rendering does not download a SoundFont. Missing dependencies or rendering failures preserve the completed MIDI and show a warning. Successful A/B audio gets its own saved-path display and Explorer button. Saving a MIDI copy does not move the A/B audio.
+
+**Processor settings** expands the Windows-specific Automatic/GPU/CPU selector; the actual backend and hardware remain visible below it. Model selection, local processing, download progress, safe output naming, repair, and process cleanup retain the existing Windows behavior.
+
+Headless Qt tests cover the controls and state transitions. Native Windows fonts, title bars, Explorer selection, high-DPI scaling, and GPU/transcription with these new options still need verification on a Windows PC; rendering Qt offscreen on macOS cannot establish those results.
+
 ## Install
 
 1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1).
@@ -35,7 +47,7 @@ The private engine uses Python 3.12.14 and matching PyTorch/torchaudio 2.7.1 CUD
 
 Cache environment overrides are respected and the app shows the effective model folder. Cached transcription works offline after engine setup and model download. Setup, repair, and new model downloads require Internet access. Credentials are handled by the Hugging Face client and never included in release assets.
 
-MIDI is not quantized. Optional upstream tempo detection is used only when its beat_this-final0.ckpt is already in the standard Torch checkpoint cache. Without it, MIDI uses the upstream default tempo metadata while preserving note timing. Transcription does not download that optional checkpoint.
+By default, MIDI is not quantized and the optional tempo helper is used only when already cached. In current source, enabling notation quantization explicitly may download the helper once; if it is unavailable, performance timing is preserved with a warning. The published Windows beta predates these new options.
 
 ## Recovery and updates
 

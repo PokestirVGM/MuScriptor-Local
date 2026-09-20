@@ -162,20 +162,24 @@ def decoded_audio(source):
         yield source
 
 
-def write_unique(directory, name, data):
-    """Publish complete MIDI atomically without ever overwriting an existing file."""
+def write_unique(directory, name, data, extension=".mid"):
+    """Publish a complete output atomically without ever overwriting an existing file."""
     directory.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=directory, prefix=".muscriptor-", delete=False) as f:
             temporary = Path(f.name)
-            f.write(data)
+            if isinstance(data, Path):
+                with data.open("rb") as source:
+                    shutil.copyfileobj(source, f)
+            else:
+                f.write(data)
             f.flush()
             os.fsync(f.fileno())
         # Close before linking/removing: Windows cannot unlink an open file.
         for index in range(10000):
             suffix = "" if index == 0 else f" ({index + 1})"
-            target = directory / f"{name}{suffix}.mid"
+            target = directory / f"{name}{suffix}{extension}"
             try:
                 os.link(temporary, target)
                 return target
@@ -213,6 +217,45 @@ def save_result(source, data, destination=None):
         output = write_unique(SUPPORT / "Results", name, data)
         emit("warning", message="The selected folder couldn’t be used. Your MIDI was kept in the app’s Results folder; choose where to save a copy.")
         return output, True
+
+
+def supported_instruments():
+    from muscriptor.tokenizer.mt3 import MT3_FULL_PLUS_GROUP_NAMES
+    return list(MT3_FULL_PLUS_GROUP_NAMES)
+
+
+def validate_options(instruments, quantize, create_ab):
+    if instruments is not None and (not isinstance(instruments, list) or
+            any(not isinstance(name, str) or name not in supported_instruments() for name in instruments)):
+        raise UserError("Choose instruments from the supported instrument picker.", "options")
+    if type(quantize) is not bool or type(create_ab) is not bool:
+        raise UserError("Transcription options must be enabled or disabled.", "options")
+    return list(dict.fromkeys(instruments)) if instruments else None
+
+
+def fluidsynth_help():
+    if platform.system() == "Windows":
+        return "On Windows, install FluidSynth, add the folder containing fluidsynth.exe to your user PATH, then reopen the app."
+    return "On macOS, install it with Homebrew: brew install fluidsynth. Then reopen the app."
+
+
+def render_comparison(midi_data, audio, output, soundfont):
+    """Use upstream rendering with an explicit local SF2; never fetch assets here."""
+    from muscriptor.utils.auralization import auralize
+    if not shutil.which("fluidsynth"):
+        raise UserError("A/B audio needs FluidSynth. " + fluidsynth_help(), "render")
+    if not soundfont or not Path(soundfont).expanduser().is_file():
+        raise UserError("A/B audio needs a local .sf2 SoundFont. Choose SoundFont… in the app and select a downloaded file such as MuseScore_General.sf2.", "render")
+    with tempfile.TemporaryDirectory(prefix="muscriptor-ab-") as folder:
+        midi = Path(folder) / "performance.mid"
+        wav = Path(folder) / "comparison.wav"
+        midi.write_bytes(midi_data)
+        auralize(midi_path=midi, original_audio_path=audio, output_path=wav,
+                 soundfont_path=Path(soundfont).expanduser())
+        try:
+            return write_unique(output.parent, output.stem + "_AB", wav, ".wav")
+        except OSError:
+            return write_unique(SUPPORT / "Results", output.stem + "_AB", wav, ".wav")
 
 
 def mps_error(exc):
@@ -309,7 +352,7 @@ class Engine:
         cached = {size: cached_weights(size) is not None for size in MODELS}
         emit("ready", model=self.model_size, cached=cached[self.model_size],
              models=cached, directory=str(model_directory(self.model_size)),
-             authenticated=bool(get_token()))
+             authenticated=bool(get_token()), instruments=supported_instruments())
 
     def select(self, model):
         model_repo(model)
@@ -384,11 +427,11 @@ class Engine:
             self.load()
         self.ready()
 
-    def beat_grid(self, wav):
-        """Optional tempo metadata must never start a download during transcription."""
+    def beat_grid(self, wav, *, allow_download=False):
+        """Only explicit notation mode may fetch an uncached tempo helper."""
         import torch
         checkpoint = Path(torch.hub.get_dir()) / "checkpoints/beat_this-final0.ckpt"
-        if not checkpoint.is_file():
+        if not checkpoint.is_file() and not allow_download:
             logging.info("Optional tempo checkpoint is not cached; preserving note timing without a beat grid")
             return None
         try:
@@ -397,11 +440,12 @@ class Engine:
             logging.exception("Optional upstream tempo detection unavailable")
             return None
 
-    def transcribe(self, source, destination=None):
-        from muscriptor.events import ProgressEvent
+    def transcribe(self, source, destination=None, *, instruments=None, quantize=False, create_ab=False, soundfont=None):
+        from muscriptor.events import ProgressEvent, NoteStartEvent
         from muscriptor.utils.audio import load_audio
         import mido
         import torch
+        instruments = validate_options(instruments, quantize, create_ab)
         with decoded_audio(source) as audio:
             emit("status", message="Reading audio…")
             try:
@@ -415,7 +459,7 @@ class Engine:
                     self.load()
                     emit("status", message="Transcribing…")
                     events = []
-                    for event in self.model.transcribe((wav, 16000)):
+                    for event in self.model.transcribe((wav, 16000), instruments=instruments):
                         if isinstance(event, ProgressEvent):
                             emit("progress", completed=event.completed, total=event.total)
                         else:
@@ -428,14 +472,32 @@ class Engine:
                     events = []
                     self.fallback()
             emit("status", message="Writing MIDI…")
-            # Standard upstream MIDI postprocessing; never quantize. Optional
-            # tempo failure must not make a valid transcription unusable offline.
-            grid = self.beat_grid(wav)
-            data = self.model.events_to_midi_bytes(iter(events), beat_grid=grid, quantize=False)
+            # Match upstream transcribe_and_postprocess while retaining progress.
+            # Tempo failure must not make a valid transcription unusable offline.
+            grid = self.beat_grid(wav, allow_download=quantize)
+            if grid is not None:
+                grid = grid.with_onset_delay([ev.start_time for ev in events if isinstance(ev, NoteStartEvent)])
+            quantized = quantize and grid is not None and grid.beat_subdivision is not None
+            if quantize and not quantized:
+                emit("warning", message="No usable beat subdivision was detected. Performance-timing MIDI was saved instead; try a recording with a steady beat. The tempo helper may need its initial download while online.")
+            data = self.model.events_to_midi_bytes(iter(events), beat_grid=grid, quantize=quantize)
             midi = mido.MidiFile(file=io.BytesIO(data))
             output, needs_save = save_result(source, data, destination)
             logging.info("Complete: %s; tracks=%d duration=%.2f device=%s", output, len(midi.tracks), midi.length, self.device)
-            emit("complete", path=str(output), needs_save=needs_save)
+            ab_path = None
+            if create_ab:
+                emit("status", message="Creating A/B audio…")
+                try:
+                    # Upstream recommends performance timing for listening, even
+                    # when the separately exported notation MIDI is quantized.
+                    performance = self.model.events_to_midi_bytes(iter(events), beat_grid=grid, quantize=False) if quantize else data
+                    ab_path = render_comparison(performance, audio, output, soundfont)
+                except Exception as exc:
+                    logging.exception("Optional A/B render failed; MIDI preserved")
+                    detail = str(exc) if isinstance(exc, UserError) else "Check your local .sf2 SoundFont and free disk space. " + fluidsynth_help() + " Details are in the app’s logs."
+                    emit("warning", message="Your MIDI was saved, but A/B audio could not be created. " + detail)
+            emit("complete", path=str(output), needs_save=needs_save,
+                 ab_path=str(ab_path) if ab_path else None, quantized=quantized)
 
 
 def report_error(exc):
@@ -522,7 +584,9 @@ def main():
                 emit("planned", path=str(planned_output(source, directory)))
             elif action == "transcribe":
                 destination = Path(command["destination"]).expanduser().absolute() if command.get("destination") else None
-                engine.transcribe(Path(command["path"]).expanduser().resolve(), destination)
+                engine.transcribe(Path(command["path"]).expanduser().resolve(), destination,
+                                  instruments=command.get("instruments"), quantize=command.get("quantize", False),
+                                  create_ab=command.get("create_ab", False), soundfont=command.get("soundfont"))
             elif action == "quit":
                 break
         except Exception as exc:

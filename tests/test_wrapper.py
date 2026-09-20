@@ -189,6 +189,14 @@ class WrapperTests(unittest.TestCase):
             self.assertIsNone(engine.beat_grid(object()))
         engine.model.detect_beat_grid_for.assert_not_called()
 
+    def test_explicit_quantization_can_prepare_uncached_tempo_helper(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.model = Mock()
+        wav = object()
+        with patch('torch.hub.get_dir', return_value=str(self.folder / 'empty-torch-cache')):
+            self.assertEqual(engine.beat_grid(wav, allow_download=True), engine.model.detect_beat_grid_for.return_value)
+        engine.model.detect_beat_grid_for.assert_called_once_with((wav, 16000), 'best-effort')
+
     def test_cached_tempo_model_uses_upstream_processing(self):
         engine = worker.Engine.__new__(worker.Engine)
         engine.model = Mock()

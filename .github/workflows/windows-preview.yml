@@ -1,8 +1,10 @@
-name: Windows preview
+name: Windows build
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
-    branches: [codex/windows-preview]
+    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -51,6 +53,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'First-run setup failed.' }
           & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_wrapper.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Worker checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_mac_options.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Shared transcription option checks failed.' }
       - uses: actions/upload-artifact@v4
         with:
           name: MuScriptor-Local-Windows-x64-Preview

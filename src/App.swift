@@ -21,6 +21,12 @@ final class AppState: ObservableObject {
     @Published var modelDirectory = ""
     @Published var source: URL? = nil
     @Published var destination: URL? = nil
+    @Published var instrumentGroups: [String] = []
+    @Published var selectedInstruments: [String] = []
+    @Published var quantizeMIDI = false
+    @Published var createAB = false
+    @Published var soundfont: URL? = nil
+    @Published var abResult: URL? = nil
     var modelName: String { selectedModel.capitalized }
     private var worker: Process?
     private var input: FileHandle?
@@ -62,6 +68,8 @@ final class AppState: ObservableObject {
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         env["HF_HUB_DISABLE_TELEMETRY"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
+        // Finder launches do not inherit a shell's Homebrew PATH.
+        env["PATH"] = (env["PATH"] ?? "/usr/bin:/bin") + ":/opt/homebrew/bin:/usr/local/bin"
         process.environment = env
         let output = Pipe(), incoming = Pipe()
         process.standardOutput = output
@@ -129,6 +137,7 @@ final class AppState: ObservableObject {
             backend = event["device"] as? String ?? "CPU"
             processorDetail = event["detail"] as? String ?? ""
         case "ready":
+            instrumentGroups = event["instruments"] as? [String] ?? instrumentGroups
             authenticated = event["authenticated"] as? Bool ?? authenticated
             setup = !(event["cached"] as? Bool ?? false)
             cachedModels = event["models"] as? [String: Bool] ?? cachedModels
@@ -145,12 +154,16 @@ final class AppState: ObservableObject {
             progress = min(1, completed / max(1, total))
             modelDirectory = event["directory"] as? String ?? modelDirectory
             message = String(format: "Downloading %@… %.2f / %.2f GB", modelName, completed / 1_000_000_000, total / 1_000_000_000)
-        case "warning": warning = event["message"] as? String ?? ""
+        case "warning":
+            if let notice = event["message"] as? String {
+                warning += warning.isEmpty ? notice : "\n\n" + notice
+            }
         case "progress":
             message = "Transcribing…"
             let total = event["total"] as? Double ?? 1
             progress = min(1, (event["completed"] as? Double ?? 0) / max(1, total))
         case "complete":
+            abResult = (event["ab_path"] as? String).map { URL(fileURLWithPath: $0) }
             if let path = event["path"] as? String { result = URL(fileURLWithPath: path); destination = result }
             needsSave = event["needs_save"] as? Bool ?? false
             busy = false; setup = false; progress = nil; message = ""; endActivity()
@@ -205,7 +218,7 @@ final class AppState: ObservableObject {
     func convert(_ url: URL) {
         guard !busy else { return }
         guard url.isFileURL else { error = "Choose an audio file stored on this Mac."; return }
-        source = url; destination = nil; result = nil; filename = url.lastPathComponent
+        source = url; destination = nil; result = nil; abResult = nil; filename = url.lastPathComponent
         planOutput()
     }
 
@@ -234,9 +247,25 @@ final class AppState: ObservableObject {
 
     func transcribe() {
         guard !busy, !setup, let source = source, let destination = destination else { return }
-        result = nil; error = ""; warning = ""; busy = true
+        result = nil; abResult = nil; error = ""; warning = ""; busy = true
         message = "Reading audio…"; progress = nil; beginActivity()
-        send(["action": "transcribe", "path": source.path, "destination": destination.path])
+        var command: [String: Any] = ["action": "transcribe", "path": source.path,
+            "destination": destination.path, "instruments": selectedInstruments,
+            "quantize": quantizeMIDI, "create_ab": createAB]
+        if let soundfont = soundfont { command["soundfont"] = soundfont.path }
+        send(command)
+    }
+
+    func chooseSoundfont() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a local SF2 SoundFont"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "sf2") ?? .data]
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            if response == .OK { self.soundfont = panel.url }
+        }
     }
 
     func save() {
@@ -259,7 +288,7 @@ final class AppState: ObservableObject {
     }
 
     func reveal() { if let result = result { NSWorkspace.shared.activateFileViewerSelecting([result]) } }
-    func another() { result = nil; source = nil; destination = nil; filename = ""; error = ""; warning = ""; message = ""; needsSave = false }
+    func another() { result = nil; abResult = nil; source = nil; destination = nil; filename = ""; error = ""; warning = ""; message = ""; needsSave = false }
     func retry() {
         error = ""
         if worker == nil || !(worker?.isRunning ?? false) { started = false; start() }
@@ -308,6 +337,59 @@ final class AppState: ObservableObject {
 struct ContentView: View {
     @ObservedObject var state: AppState
     @State private var hovering = false
+    @State private var instrumentSearch = ""
+
+    func instrumentLabel(_ name: String) -> String {
+        name.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    var transcriptionOptions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Instruments").font(.headline)
+            Text("Leave empty to detect any supported instrument.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(state.selectedInstruments, id: \.self) { name in
+                HStack {
+                    Text(instrumentLabel(name))
+                    Spacer()
+                    Button { state.selectedInstruments.removeAll { $0 == name } } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }.buttonStyle(.plain).accessibilityLabel("Remove \(instrumentLabel(name))")
+                }.padding(7).background(Color.accentColor.opacity(0.1)).cornerRadius(7)
+            }
+            TextField("Search instruments", text: $instrumentSearch).textFieldStyle(.roundedBorder)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    let matches = state.instrumentGroups.filter {
+                        !state.selectedInstruments.contains($0) &&
+                        (instrumentSearch.isEmpty || instrumentLabel($0).localizedCaseInsensitiveContains(instrumentSearch))
+                    }
+                    if matches.isEmpty { Text("No matching instruments").foregroundStyle(.secondary) }
+                    ForEach(matches, id: \.self) { name in
+                        Button {
+                            state.selectedInstruments.append(name)
+                            instrumentSearch = ""
+                        } label: {
+                            Label(instrumentLabel(name), systemImage: "plus.circle")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.buttonStyle(.plain).padding(.vertical, 3)
+                    }
+                }
+            }.frame(height: 100)
+            Toggle("Quantize MIDI for notation", isOn: $state.quantizeMIDI).toggleStyle(.checkbox)
+            Text("Off keeps performance timing. Both modes use upstream onset correction when a usable beat grid is detected.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Create A/B audio render", isOn: $state.createAB).toggleStyle(.checkbox)
+            if state.createAB {
+                Text("Original audio on the left; performance-timing MIDI synthesis on the right. Requires FluidSynth and a local SF2 SoundFont.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Choose SoundFont…") { state.chooseSoundfont() }
+                if let soundfont = state.soundfont { pathLabel(soundfont.path) }
+                else { Text("Choose a SoundFont to enable local audio rendering.").font(.caption).foregroundStyle(.secondary) }
+            }
+        }.padding(14).background(Color.primary.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 12))
+            .disabled(state.busy)
+    }
 
     func pathLabel(_ path: String) -> some View {
         Text(path).font(.system(size: 11, design: .monospaced))
@@ -396,6 +478,18 @@ struct ContentView: View {
                             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(hovering ? Color.accentColor : Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
+                    }
+                }
+
+                if !state.setup && state.result == nil { transcriptionOptions }
+
+                if let abResult = state.abResult {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("A/B audio saved to").font(.headline)
+                        pathLabel(abResult.path)
+                        Button("Reveal A/B Audio in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([abResult])
+                        }
                     }
                 }
 
