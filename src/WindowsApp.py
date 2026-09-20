@@ -414,6 +414,11 @@ class MainWindow(QMainWindow):
         self.closing = True
         for process in (self.worker, self.installer):
             if process and process.state() != QProcess.NotRunning:
+                if sys.platform == "win32":
+                    # Include this worker's decoder / this installer's uv children.
+                    QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
+                    process.waitForFinished(1500)
+                    continue
                 process.terminate()
                 if not process.waitForFinished(1500):
                     process.kill()

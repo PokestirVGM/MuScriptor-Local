@@ -245,6 +245,13 @@ def system_memory():
 def device_inventory():
     import torch
     cpu = os.environ.get("PROCESSOR_IDENTIFIER") or platform.processor() or platform.machine()
+    if platform.system() == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                cpu = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+        except (ImportError, OSError):
+            pass
     if platform.system() == "Darwin":
         try:
             cpu = subprocess.check_output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
