@@ -22,8 +22,8 @@ import warnings
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-# Use Hugging Face's resumable HTTP transport. Xet failed on this Mac's CDN
-# connection; HTTP also exposes exact byte progress without an extra chunk cache.
+# Use Hugging Face's resumable HTTP transport for byte progress without
+# an additional chunk cache.
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 MODEL = "large"

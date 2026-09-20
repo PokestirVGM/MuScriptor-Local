@@ -1,68 +1,83 @@
 # MuScriptor Local
 
-A small native macOS window around the **official MuScriptor Small, Medium, and Large** Python engine. All audio processing runs on this Mac. No hosted inference, browser server, Electron, or audio uploads.
+A desktop app for turning audio into MIDI with the official [MuScriptor](https://github.com/muscriptor/muscriptor) engine. Transcription runs locally on your computer. This is an independent community wrapper, not an official Kyutai or Mirelo application.
 
-## Open and use
+**[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
-Open **`/Users/nicho/Applications/MuScriptor Local.app`** in Finder or Spotlight. Choose **Small**, **Medium**, or **Large** at the top of the window. Drag one audio file in, or click to choose it, then review the full **MIDI destination**. Use **Change Folder…** to choose a different output folder and click **Transcribe** when ready. After transcription, use **Save MIDI Copy…**, **Reveal in Finder**, or **Convert Another**. Closing the window quits the app and stops its Python worker.
+## Platform status
 
-On first use of each size, open its **model terms** link in the app and accept the terms for that model on Hugging Face. Create a **read** token at <https://huggingface.co/settings/tokens> using the same account, paste it into the app’s secure field, and click **Connect & Download** for your selected size. If already connected, use **Download**. If using a fine-grained token, allow reading this gated model. The app stores authentication through Hugging Face, downloads the official weights, and loads them. No need to sign in on later launches. The weights are licensed CC BY-NC 4.0 with the additional conditions shown on the model page.
+| Platform | Status |
+| --- | --- |
+| macOS 14+ on Apple Silicon | Public 1.0 beta |
+| Windows 10/11 x64 | [Development preview](https://github.com/PokestirVGM/MuScriptor-Local/tree/codex/windows-preview); hardware validation pending |
+| Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
-**The model selector remembers your choice; Large is the initial default.** Switching releases the previous model from memory but keeps its downloaded files. Switching to an uncached model shows setup without automatically downloading it. Model changes are disabled while downloading, loading, or transcribing. **Apple MPS is preferred.** The status line shows the actual selected backend. Unsupported MPS operations use PyTorch’s CPU fallback; an MPS failure that prevents transcription restarts the whole song on CPU and displays a short notice. Ordinary audio or model errors do not silently change devices.
+## Install on macOS
 
-Model download progress shows actual bytes received and the total for the selected checkpoint. The window displays the actual model download folder as selectable text, respecting Hugging Face cache overrides; it does not open Finder. Transcription progress is MuScriptor’s actual count of completed five-second audio chunks. Loading and final MIDI writing use an indeterminate indicator. Long songs are processed in full; there is no excerpt limit. Quitting during a conversion cancels that conversion. Network interruptions are retried by Hugging Face’s HTTP downloader. Failed/canceled downloads clean up their partial file; quitting the app during download may require starting the download again.
+1. Download **MuScriptor Local - Apple Silicon.zip** from [Releases](https://github.com/PokestirVGM/MuScriptor-Local/releases).
+2. Unzip it, move **MuScriptor Local.app** into Applications, and open it.
+3. Let the app install its private Python environment. First setup requires Internet access.
+4. Choose **Small**, **Medium**, or **Large**. Open the selected model’s terms link and accept its conditions with your Hugging Face account.
+5. Create a [Hugging Face read token](https://huggingface.co/settings/tokens), paste it into the app, and choose **Connect & Download**. If already connected, choose **Download**.
 
-## Audio and output
+The app is locally signed, but **not Apple-notarized**. macOS may require approval in **System Settings → Privacy & Security**. Download the app from this repository’s release page.
 
-- WAV, MP3 and FLAC work directly through the official loader. Other libsndfile formats, including AIFF and OGG, are also accepted.
-- M4A/AAC and formats unavailable in libsndfile are decoded by the bundled ARM64 FFmpeg. No Homebrew or manual conversion is needed. Decoding preserves the original rate and channels; **MuScriptor itself** converts to 16 kHz mono. Temporary WAVs are removed after completion or failure.
-- Output defaults to `<original stem>_transcription.mid` beside the source. Before transcription, the app previews its full path and lets you choose another folder. Existing files are preserved; repeats get ` (2)`, ` (3)`, etc. If another file takes the previewed name during transcription, the result gets another unique name and the completed screen shows the actual saved path.
-- If the source folder cannot be written, the result is kept under `~/Library/Application Support/MuScriptor Local/Results/` and a normal Save dialog opens. Canceling that dialog does not discard the MIDI. Save MIDI Copy can always save an additional copy.
-- MIDI is generated by the upstream `transcribe()` and `events_to_midi_bytes()` APIs with standard greedy/prelude behavior, standard best-effort tempo detection, and **quantize=False**. The wrapper does not generate or edit note data. If optional tempo detection is unavailable, upstream’s supported default tempo is used and absolute note timing is retained.
+Each model size needs its own terms acceptance and download. Large needs substantially more memory and disk space than Small. Allow roughly 10 GB for initial setup with Large; retaining multiple models needs additional space. Performance varies with hardware and recording length.
 
-## Installation locations
+## Transcribe audio
+
+1. Choose a model. The app remembers your choice and keeps downloaded models cached when you switch.
+2. Drop one audio file into the window, or click to choose it.
+3. Review the full **MIDI destination**. Use **Change Folder…** to select a different output folder.
+4. Click **Transcribe**. When it finishes, use **Save MIDI Copy…**, **Reveal in Finder**, or **Convert Another**.
+
+The default output is `<song>_transcription.mid` beside the audio. Existing files are preserved; duplicates get a numbered name. If a folder becomes unavailable, the app attempts to keep the MIDI in its Results folder and opens a save dialog. Canceling that dialog keeps the recovered result.
+
+Model download progress shows bytes received and the actual cache folder as selectable text. Transcription progress follows the engine’s five-second chunks. Loading and final MIDI writing have an indeterminate indicator. Model switching is disabled while work is in progress. Closing the app stops its worker and cancels the current operation.
+
+WAV, MP3, FLAC, M4A/AAC, and other formats supported by the loader or FFmpeg are accepted. The official engine performs resampling and MIDI generation; the wrapper does not invent or edit notes. MIDI is produced without quantization. Transcription is approximate and may require editing, particularly for dense recordings.
+
+## Processing and privacy
+
+The macOS app prefers **Apple MPS** and displays the selected backend. Recognized MPS failures restart the complete song on CPU with a visible notice. Unrelated audio errors do not silently switch processors.
+
+Audio and inference stay on the computer. Setup and updates download software and models from their providers. Hugging Face credentials are stored by its client and sent to Hugging Face for authentication; the app does not include credentials in release downloads or command-line arguments. No hosted inference service, local web server, or app analytics is used. After setup and model download, cached models can transcribe offline. See [PRIVACY.md](PRIVACY.md).
+
+## Files and storage
+
+These are the default locations for the released macOS app:
 
 | Item | Location |
 | --- | --- |
-| Finder application | `/Users/nicho/Applications/MuScriptor Local.app` |
-| Wrapper, upstream checkout, isolated Python and dependencies | `/Users/nicho/Documents/_Repositories/MuScriptor Local` |
-| Python environment | `.venv/` within that folder |
-| Private Python runtime (unused package cache is cleaned after setup) | `runtime/` within that folder |
-| Official MuScriptor source | `upstream/` within that folder |
-| Hugging Face model cache | `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/` |
-| Hugging Face credentials | `~/.cache/huggingface/token` and `stored_tokens` (owner-only permissions) |
-| Upstream’s standard tempo helper | `~/.cache/torch/hub/checkpoints/beat_this-final0.ckpt` |
-| Logs | `~/Library/Logs/MuScriptor Local/` |
+| Private engine and Python environment | `~/Library/Application Support/MuScriptor Local/Engine/` |
+| Recovered MIDI files | `~/Library/Application Support/MuScriptor Local/Results/` |
+| Diagnostic logs | `~/Library/Logs/MuScriptor Local/` |
+| Model cache | `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-<size>/` |
+| Hugging Face credentials | Hugging Face’s standard user cache |
 
-Existing `HF_HOME`/Hugging Face cache environment overrides are respected. Model weights are **outside** the app bundle. Keep the project folder at its installed path: the small app points to it. The app checks Python, required imports, decoder availability, the cached model, and MPS each time it starts. Cached model/config files load directly with no Hugging Face network check, so transcription works offline once setup finishes. The tempo helper was cached during installation too.
+The model cache stays outside the app bundle. Existing Hugging Face cache environment overrides are respected; the app displays the effective path. The optional upstream tempo helper uses its own Torch cache.
 
-The exact package versions are in `requirements.lock`, and the inspected official source revision is in `upstream-revision.txt`. No global Python environment was modified. No Homebrew or Docker was installed.
+To update, quit the app, replace it with a newer release, and reopen it. The portable app refreshes its local worker automatically. Use **MuScriptor Local → Repair Dependencies…** if dependency setup fails or needs refreshing. **Show Logs** opens the diagnostic folder. Review and redact local paths before posting logs publicly.
 
-## Update or repair
+To uninstall, quit and trash the app, then remove its private engine folder if no longer needed. Save any recovered MIDI files before deleting Results. Model caches and credentials are shared with other Hugging Face tools; remove only files you recognize and no longer need. MIDI saved elsewhere is unaffected.
 
-Quit the app, then double-click **`Update MuScriptor.command`** in the project folder to fetch the current official source and update the dedicated environment. It refreshes the package lock and recorded upstream revision. Updates need an Internet connection. Model weights remain cached. Since upstream APIs can change, try a short recording after an update.
+## Development
 
-For missing/broken dependencies, launch the app and choose **MuScriptor Local → Repair Dependencies…**. This reinstalls the recorded package versions into the same dedicated environment, using cached packages where available; otherwise it needs Internet access. It never installs into the system Python. Developer rebuild: `zsh tools/build.sh`, then copy `build/MuScriptor Local.app` back into your personal Applications folder.
+The macOS interface is Swift/AppKit/SwiftUI; the worker is Python. The pinned upstream revision is recorded in `upstream-revision.txt`, and the macOS environment uses `requirements.lock`.
 
-Errors are short in the normal window. **MuScriptor Local → Show Logs** opens detailed diagnostic logs. `engine.log` rotates at 2 MB (three backups), and `upstream.log` rotates on launch after 4 MB. Tokens are passed through a private process pipe, never command-line arguments or logs. No network port is opened.
+Clone this repository, fetch the official upstream source into `upstream/` at the recorded revision, and set up the dedicated `.venv`. `tools/bootstrap.sh` is the installer bundled with release builds; `tools/repair.sh` and `tools/update.sh` maintain an existing development environment.
 
-## Share with a friend
+- `zsh tools/build.sh` builds a local launcher that points at the checkout.
+- `zsh tools/share.sh` creates a portable app and zip with no checkout-specific installation path.
+- `.venv/bin/python -m unittest discover -s tests -v` runs the wrapper checks.
+- `validation/validate_controls.py` exercises real model switching and offline Large transcription after the model is cached and the sample audio has been generated.
 
-Send **`dist/MuScriptor Local - Apple Silicon.zip`** and **`dist/Read Me First.txt`**. This copy automatically creates its own isolated installation in `~/Library/Application Support/MuScriptor Local/Engine/`. It includes the native UI and the pinned official engine source, but no token, model weights, recordings or MIDI. Your friend must accept the model terms with their own Hugging Face account and enter their own read token. They need an Apple Silicon Mac with macOS 14 or later, adequate memory for their selected model, and about 10 GB free for setup with Large. Keeping all three models requires additional disk space. Only this Mac has been used for hardware validation.
+Generated app bundles and archives belong in GitHub Releases, not source control. See [CONTRIBUTING.md](CONTRIBUTING.md) and [validation/RESULTS.md](validation/RESULTS.md) for validation scope and known limitations.
 
-The app is locally signed, not Apple-notarized, so a downloaded copy may need explicit approval in macOS Privacy & Security. This is a personal convenience wrapper, not an App Store release. Rebuild the share archive with `zsh tools/share.sh` after changing the wrapper or updating its engine. Your locally installed launcher continues using the project folder described above.
+## Licenses and attribution
 
-## Uninstall
+The wrapper code is available under the [MIT License](LICENSE). The included official MuScriptor source is separately MIT licensed by **Kyutai x Mirelo**; its notice is retained in [licenses/MuScriptor-MIT.txt](licenses/MuScriptor-MIT.txt).
 
-1. Quit MuScriptor Local and move `/Users/nicho/Applications/MuScriptor Local.app` to Trash.
-2. Move `/Users/nicho/Documents/_Repositories/MuScriptor Local` to Trash to remove the wrapper, private runtime, installed dependencies and package cache.
-3. Optionally remove `~/Library/Logs/MuScriptor Local/`. Review and save any MIDI files in `~/Library/Application Support/MuScriptor Local/Results/` before removing that folder.
-4. To reclaim model space, remove only `~/.cache/huggingface/hub/models--MuScriptor--muscriptor-{small,medium,large}/`. Leave other Hugging Face caches alone. The 77 MB `beat_this-final0.ckpt` can also be removed if no other app needs it.
+**The code license does not license the model weights.** Weights are downloaded separately and use **CC BY-NC 4.0 plus the additional conditions on each model page**. Review and accept the applicable terms: [Small](https://huggingface.co/MuScriptor/muscriptor-small), [Medium](https://huggingface.co/MuScriptor/muscriptor-medium), [Large](https://huggingface.co/MuScriptor/muscriptor-large). Use audio for which you have the necessary rights.
 
-MIDI files already saved beside your audio or elsewhere stay intact. Hugging Face credentials are shared with other local Hugging Face tools, so uninstalling this wrapper leaves them alone. You can revoke the app’s read token in Hugging Face settings if you no longer need it.
-
-## Validation
-
-See `validation/RESULTS.md` for actual completed checks and any remaining model-access blocker. `tests/test_wrapper.py` exercises real decoding and cleanup, model selection and cache routing, download progress paths, output previews and custom folders, safe output handling, disk errors, and device-failure classification. `validation/make_audio.py` creates an original 12-second test melody in five formats without using anyone else’s recording.
-
-Official project: <https://github.com/muscriptor/muscriptor>. Upstream code is MIT licensed; its license is in `upstream/LICENSE`.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for component attribution. The application name does not imply endorsement by the upstream authors.
