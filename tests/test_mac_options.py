@@ -118,13 +118,15 @@ class MacOptionsTests(unittest.TestCase):
             self.run_transcription()
             render.assert_not_called()
 
-    def test_missing_dependencies_keep_completed_midi_with_mac_help(self):
-        for available, soundfont, expected in ((None, None, "brew install fluidsynth"), ("/opt/homebrew/bin/fluidsynth", None, "Choose SoundFont")):
-            with patch.object(worker.shutil, "which", return_value=available):
-                result = self.run_transcription(create_ab=True, soundfont=soundfont)
-                self.assertTrue(Path(result["path"]).is_file())
-                self.assertIsNone(result["ab_path"])
-                self.assertTrue(any(expected in e.get("message", "") for e in self.reports))
+    def test_missing_dependencies_keep_completed_midi_with_platform_help(self):
+        for system, guidance in (("Darwin", "brew install fluidsynth"), ("Windows", "fluidsynth.exe")):
+            for available, expected in ((None, guidance), ("fluidsynth", "Choose SoundFont")):
+                with self.subTest(system=system, available=available), patch.object(worker.platform, "system", return_value=system), patch.object(worker.shutil, "which", return_value=available):
+                    self.reports.clear()
+                    result = self.run_transcription(create_ab=True, soundfont=None)
+                    self.assertTrue(Path(result["path"]).is_file())
+                    self.assertIsNone(result["ab_path"])
+                    self.assertTrue(any(expected in e.get("message", "") for e in self.reports))
 
     def test_upstream_render_stereo_unique_publication_and_cleanup(self):
         font = self.folder / "font.sf2"
