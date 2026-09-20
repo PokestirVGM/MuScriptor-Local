@@ -1,0 +1,97 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+ 48 16.1M   48 7983k    0     0  7230k      0  0:00:02  0:00:01  0:00:01 7230k100 16.1M  100 16.1M    0     0  10.6M      0  0:00:01  0:00:01 --:--:-- 20.2M
+Downloading cpython-3.12.14-macos-aarch64-none (download) (23.8MiB)
+ Downloaded cpython-3.12.14-macos-aarch64-none (download)
+Installed Python 3.12.14 in 2.27s
+ + cpython-3.12.14-macos-aarch64-none
+warning: Failed to install executable for cpython-3.12.14-macos-aarch64-none
+  cause: Executable already exists at `/Users/nicho/.local/bin/python3.12` but is not managed by uv; use `--force` to replace it
+Using CPython 3.12.14
+Creating virtual environment at: .venv
+Activate with: source .venv/bin/activate
+WARN Fixing invalid version specifier by removing stray quotes (before: `>= '2.7'`; after: `>= 2.7`)
+Resolved 55 packages in 686ms
+   Building muscriptor @ file:///private/tmp/muscriptor-portable-validation/upstream
+Downloading pygments (1.2MiB)
+Downloading hf-xet (3.7MiB)
+Downloading imageio-ffmpeg (20.1MiB)
+Downloading networkx (2.0MiB)
+Downloading pydantic-core (1.8MiB)
+Downloading uvloop (1.3MiB)
+Downloading numpy (5.2MiB)
+Downloading torch (121.4MiB)
+Downloading soundfile (1.1MiB)
+Downloading sympy (6.0MiB)
+      Built muscriptor @ file:///private/tmp/muscriptor-portable-validation/upstream
+ Downloaded soundfile
+ Downloaded pygments
+ Downloaded uvloop
+ Downloaded pydantic-core
+ Downloaded networkx
+ Downloaded hf-xet
+ Downloaded numpy
+ Downloaded sympy
+ Downloaded imageio-ffmpeg
+ Downloaded torch
+Prepared 55 packages in 11.44s
+Installed 55 packages in 188ms
+ + annotated-doc==0.0.5
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + beat-this==1.1.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + click==8.5.0
+ + einops==0.8.2
+ + fastapi==0.141.1
+ + filelock==4.0.1
+ + fsspec==2026.9.0
+ + h11==0.16.0
+ + hf-xet==1.6.0
+ + httpcore==1.0.9
+ + httptools==0.8.0
+ + httpx==0.28.1
+ + huggingface-hub==1.32.0
+ + idna==3.20
+ + imageio-ffmpeg==0.6.0
+ + jinja2==3.1.6
+ + markdown-it-py==4.2.0
+ + markupsafe==3.0.3
+ + mdurl==0.1.2
+ + mido==1.3.3
+ + mpmath==1.3.0
+ + muscriptor==0.3.0 (from file:///private/tmp/muscriptor-portable-validation/upstream)
+ + networkx==3.6.1
+ + numpy==2.5.3
+ + packaging==26.3
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pygments==2.21.0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + rich==15.0.0
+ + rotary-embedding-torch==0.9.1
+ + safetensors==0.8.0
+ + setuptools==84.0.0
+ + shellingham==1.5.4
+ + soundfile==0.14.0
+ + soxr==1.1.0
+ + starlette==1.6.0
+ + sympy==1.14.0
+ + torch==2.14.0
+ + torchaudio==2.11.0
+ + tqdm==4.70.1
+ + typer==0.27.2
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + uvicorn==0.53.0
+ + uvloop==0.22.1
+ + watchfiles==1.2.0
+ + websockets==17.1
+Checked 55 packages in 0.85ms
+All installed packages are compatible
+Local environment is ready.

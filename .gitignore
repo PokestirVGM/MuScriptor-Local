@@ -1,0 +1,12 @@
+.venv/
+runtime/
+build/
+tools/uv
+upstream/
+__pycache__/
+validation/*.wav
+validation/*.mp3
+validation/*.m4a
+validation/*.aac
+validation/*.flac
+validation/*.mid

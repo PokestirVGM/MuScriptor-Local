@@ -1,0 +1,25 @@
+test_cleanup_when_transcription_raises (test_wrapper.WrapperTests.test_cleanup_when_transcription_raises) ... {"type": "status", "message": "Preparing audio\u2026"}
+ok
+test_corrupt_file_is_readable_error (test_wrapper.WrapperTests.test_corrupt_file_is_readable_error) ... Note: Illegal Audio-MPEG-Header 0x00000000 at offset 12.
+Note: Trying to resync...
+Note: Hit end of (available) data during resync.
+{"type": "status", "message": "Preparing audio\u2026"}
+ERROR:root:Audio decoder: [mp3 @ 0x14cf1a010] Failed to find two consecutive MPEG audio frames.
+[in#0 @ 0x14cf19dc0] Error opening input: Invalid data found when processing input
+Error opening input file /var/folders/rm/8nhccysd2dsbslw_jk0xszgw0000gn/T/tmpgcrx4z43/corrupt.mp3.
+Error opening input files: Invalid data found when processing input
+
+ok
+test_default_is_large (test_wrapper.WrapperTests.test_default_is_large) ... ok
+test_insufficient_disk_space (test_wrapper.WrapperTests.test_insufficient_disk_space) ... ok
+test_only_device_errors_trigger_cpu_retry (test_wrapper.WrapperTests.test_only_device_errors_trigger_cpu_retry) ... ok
+test_real_audio_formats_and_upstream_sample_handling (test_wrapper.WrapperTests.test_real_audio_formats_and_upstream_sample_handling) ... {"type": "status", "message": "Preparing audio\u2026"}
+{"type": "status", "message": "Preparing audio\u2026"}
+ok
+test_save_never_overwrites_and_leaves_no_partial (test_wrapper.WrapperTests.test_save_never_overwrites_and_leaves_no_partial) ... ok
+test_save_permission_fallback (test_wrapper.WrapperTests.test_save_permission_fallback) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.177s
+
+OK
