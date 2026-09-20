@@ -384,6 +384,19 @@ class Engine:
             self.load()
         self.ready()
 
+    def beat_grid(self, wav):
+        """Optional tempo metadata must never start a download during transcription."""
+        import torch
+        checkpoint = Path(torch.hub.get_dir()) / "checkpoints/beat_this-final0.ckpt"
+        if not checkpoint.is_file():
+            logging.info("Optional tempo checkpoint is not cached; preserving note timing without a beat grid")
+            return None
+        try:
+            return self.model.detect_beat_grid_for((wav, 16000), "best-effort")
+        except Exception:
+            logging.exception("Optional upstream tempo detection unavailable")
+            return None
+
     def transcribe(self, source, destination=None):
         from muscriptor.events import ProgressEvent
         from muscriptor.utils.audio import load_audio
@@ -417,11 +430,7 @@ class Engine:
             emit("status", message="Writing MIDI…")
             # Standard upstream MIDI postprocessing; never quantize. Optional
             # tempo failure must not make a valid transcription unusable offline.
-            try:
-                grid = self.model.detect_beat_grid_for((wav, 16000), "best-effort")
-            except Exception:
-                logging.exception("Optional upstream tempo detection unavailable")
-                grid = None
+            grid = self.beat_grid(wav)
             data = self.model.events_to_midi_bytes(iter(events), beat_grid=grid, quantize=False)
             midi = mido.MidiFile(file=io.BytesIO(data))
             output, needs_save = save_result(source, data, destination)

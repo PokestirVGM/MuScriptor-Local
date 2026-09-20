@@ -1,44 +1,59 @@
-# Windows preview
+# MuScriptor Local 1.0 Beta for Windows
 
-The Windows interface is being developed separately from the published macOS 1.0 Beta. It shares the official MuScriptor transcription engine and the model/output controls. This is an x64 Windows 10/11 preview; Windows ARM and AMD/Intel GPU acceleration are not included.
+An independent desktop wrapper for the official MuScriptor engine. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM and AMD/Intel GPU acceleration are not included.
 
-## Processor display
+## Install
 
-The app reports the actual backend and processor name. NVIDIA CUDA devices include their dedicated GPU memory; CPU mode reports system memory. Automatic chooses the available NVIDIA GPU with the most memory, or CPU when CUDA is unavailable. The Processor selector also allows a specific available GPU or CPU. Memory figures are total capacity, not an estimate of free space or whether a model will fit.
+1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1).
+2. Run the installer. It installs for your account and creates a Start Menu shortcut and uninstaller; administrator access is not required.
+3. Open MuScriptor Local and allow first-run engine setup to finish. Internet access is required for the private Python runtime and CPU or CUDA dependencies.
+4. Choose a model. Accept that size's Hugging Face terms yourself, then connect your own read token in the app. Each size requires separate acceptance and download.
+5. Choose audio, review the MIDI destination, and click **Transcribe**. **Change Output Folder** selects another destination; existing MIDI files get a numbered filename instead of being overwritten.
 
-The engine validates where the loaded model actually resides. If a recognized GPU operation fails, the complete song retries on CPU and the display changes to CPU with a warning. If a previously saved GPU is no longer available, startup returns to Automatic. AMD/Intel graphics use CPU in this preview; the app does not claim to accelerate on an unsupported GPU.
+The **Portable.zip** alternative contains the same app. Extract the whole archive and keep the executable, **_internal**, and **Legal** folders together. The engine, cache, and settings still live in your Windows account.
 
-On macOS, the shared worker reports the Apple chip, Apple MPS, and shared unified memory. The released macOS beta has its original compact backend label; the development branch adds the hardware detail.
+CUDA setup downloads roughly 3 GiB of PyTorch packages plus other dependencies. Large downloads about 5.47 GB of weights. Allow at least 20 GB of free disk space for CUDA setup and Large, including extraction and cache overhead. Additional models require more space.
 
-## Build and run
+## Processor selection
 
-On an x64 Windows machine with Python 3.12 and Git installed:
+**Automatic** chooses the available NVIDIA GPU with the most memory, otherwise CPU. A specific NVIDIA GPU or CPU can also be selected. The window reports processor names and total memory capacity, not free memory or a guarantee that every model and recording will fit.
 
-1. Check out the `codex/windows-preview` branch.
-2. Install [Inno Setup 6](https://jrsoftware.org/isdl.php) for installer packaging, then run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1` from the project. This installs build dependencies into the current Python environment; use a dedicated virtual environment for development.
-3. Run `dist/windows/MuScriptor-Local-Windows-x64-Setup-Preview.exe`. It installs for the current user without administrator access and creates a Start Menu shortcut and uninstaller. A portable zip is also built; keep its entire extracted folder together.
-4. First launch installs a private Python runtime and engine under `%LOCALAPPDATA%\MuScriptor Local\Engine`. A visible setup status remains in the window. Logs are under `%LOCALAPPDATA%\MuScriptor Local\Logs` (App → Show Logs).
-5. Choose a model, accept that size’s Hugging Face terms, and connect your own read token. The actual model cache path appears in the window.
-6. Drop audio in, review or change the MIDI output folder, and click Transcribe.
+The worker checks the loaded model's actual device. Recognized GPU failures retry the complete transcription on CPU with a warning. An unavailable saved GPU returns to Automatic. AMD/Intel graphics use CPU.
 
-The app downloads the official uv Python installer and official Python packages. It checks for NVIDIA driver tooling when choosing CPU versus CUDA packages, then the worker checks whether PyTorch can actually use CUDA. A recent NVIDIA driver supporting the selected CUDA build is required for GPU acceleration. No driver or system Python changes are made. The bootstrap uses matching PyTorch/torchaudio 2.7.1 packages and records the resolved dependencies in `Engine/runtime/installed-packages.txt`.
+The private engine uses Python 3.12.14 and matching PyTorch/torchaudio 2.7.1 CUDA 12.8 or CPU packages. No system Python or driver is changed. A compatible NVIDIA driver is required. See [validation results](https://github.com/PokestirVGM/MuScriptor-Local/blob/v1.0.0-beta.windows.1/validation/WINDOWS_RESULTS.md) for tested hardware and limitations.
 
-To explicitly set up CPU mode from source, run `tools/bootstrap-windows.ps1 -Root <checkout> -Resources <checkout> -Compute cpu`. For CUDA use `-Compute cuda`. The app's Repair Dependencies command repeats automatic detection. A model-cache download, or new Python dependencies, requires Internet access; audio remains local.
+## Storage and offline operation
 
-The Python launcher can also be run from a development environment containing `PySide6-Essentials` as `python src/WindowsApp.py`, after setting up the root's `.venv` with the bootstrap.
+| Item | Default location |
+| --- | --- |
+| Installed app | %LOCALAPPDATA%/Programs/MuScriptor Local |
+| Private engine | %LOCALAPPDATA%/MuScriptor Local/Engine |
+| Recovered MIDI | %LOCALAPPDATA%/MuScriptor Local/Results |
+| Local diagnostics | %LOCALAPPDATA%/MuScriptor Local/Logs |
+| Model cache and Hugging Face credentials | %USERPROFILE%/.cache/huggingface |
+| MIDI | Beside the source audio or in your chosen folder |
 
-## Validation and packaging
+Cache environment overrides are respected and the app shows the effective model folder. Cached transcription works offline after engine setup and model download. Setup, repair, and new model downloads require Internet access. Credentials are handled by the Hugging Face client and never included in release assets.
 
-The `Windows preview` GitHub Actions workflow builds the executable and setup installer on Windows, runs headless UI tests, smoke-tests the packaged executable, installs the CPU worker in a fresh directory, and runs the wrapper tests. Successful runs attach the installer and portable archive to the workflow run. The installer removes only the app and shortcuts when uninstalled; model caches, credentials, and MIDI remain untouched. These checks do not download gated model weights or validate a real NVIDIA GPU.
+MIDI is not quantized. Optional upstream tempo detection is used only when its beat_this-final0.ckpt is already in the standard Torch checkpoint cache. Without it, MIDI uses the upstream default tempo metadata while preserving note timing. Transcription does not download that optional checkpoint.
 
-Before publishing a Windows release, test on the actual PC: first launch, NVIDIA driver detection, actual CUDA model loading and transcription, all three model sizes permitted by the account, drag/drop, output folders with spaces/non-ASCII names, offline startup after download, safe collisions, restart/repair, and quitting during download/transcription. The current Mac cannot establish Windows GPU compatibility.
+## Recovery and updates
 
-The executable is not Authenticode-signed. No account credentials, model weights, or recordings are included. Official model licenses and account/terms requirements are the same as for the macOS app.
+**Try Again** repairs incomplete engine setup. **App → Repair Dependencies** repeats automatic engine setup. **App → Show Logs** opens local diagnostics; redact personal paths before sharing any log excerpts.
 
-Implementation references: [PyTorch Windows setup](https://pytorch.org/get-started/locally/) and [Qt process handling](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QProcess.html).
+Close the app before upgrading through the installer. Closing during work cancels the active operation; completed MIDI remains intact and model downloads can resume. Uninstall removes the app and shortcuts while retaining engine files, shared model caches, credentials, settings, and MIDI. Remove retained data separately only if you no longer need it.
 
-## Continue on the Windows PC
+## Beta scope
 
-Clone this repository and check out `codex/windows-preview`. Give Codex this prompt:
+- The installer and executable are unsigned.
+- Large-model CUDA and offline CPU transcription were tested on Windows 11 with an AMD Ryzen 9 9950X and NVIDIA GeForce RTX 5070 Ti (16 GB), driver 610.88.
+- Small and Medium transcription, other GPUs, Windows 10, and the full upgrade/uninstall preservation cycle were not independently validated on this PC.
+- Offline CUDA transcription was not separately completed in this validation session.
+- Transcription is approximate and may require musical editing. CPU mode is slower.
+- Downloads contain no model weights, credentials, recordings, MIDI results, or private logs. Component notices are in **Legal**.
 
-> Finish the Windows 1.0 beta for MuScriptor Local. Read WINDOWS.md, WINDOWS_HANDOFF.md, and the latest Windows preview workflow results. Test the setup installer, identify this PC's CPU/GPU and available memory, verify the displayed processor against the model's actual device, and run a complete local transcription using an authorized model. Check custom output folders, restart/offline behavior, and installer/uninstaller behavior. Fix any Windows-specific problems, then publish a Windows 1.0 beta release with the installer, portable zip, checksums, and accurate validation notes. Keep the existing macOS release available and do not publish credentials, recordings, local paths, or raw personal logs.
+The [macOS v1.0.0-beta.2 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.2) remains available.
+
+## Development
+
+Use a dedicated Python 3.12 environment, Git, and Inno Setup 6, then run tools/build-windows.ps1. The Windows preview workflow builds both packages, checks the UI and worker, smoke-tests installation, and tests first-run setup in Windows PowerShell with an engine path containing spaces. Resolved engine dependencies are recorded locally in Engine/runtime/installed-packages.txt.

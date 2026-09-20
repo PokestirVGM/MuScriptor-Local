@@ -1,5 +1,9 @@
 # Windows 1.0 beta handoff
 
+## Release update — 2026-09-20
+
+The Windows beta is now prepared as `v1.0.0-beta.windows.1`. See [WINDOWS.md](WINDOWS.md) for installation and [validation/WINDOWS_RESULTS.md](validation/WINDOWS_RESULTS.md) for completed physical-PC checks and explicit limits. The owner confirmed the app works and requested publication with those limits. The original handoff below records the pre-validation state and checklist; it is not a claim that every item was completed. The macOS tag `v1.0.0-beta.2` is preserved.
+
 ## Current state
 
 - The newest public macOS release is `v1.0.0-beta.2`, titled **MuScriptor Local 1.0 Beta — macOS**. Keep it available when adding a Windows release.

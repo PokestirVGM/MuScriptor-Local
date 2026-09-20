@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $directory = "$env:RUNNER_TEMP/MuScriptor Installed"
-          $setup = Start-Process 'dist/windows/MuScriptor-Local-Windows-x64-Setup-Preview.exe' -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$directory`"" -Wait -PassThru
+          $setup = Start-Process 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe' -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$directory`"" -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw 'Setup installer failed.' }
           $app = Start-Process "$directory/MuScriptor Local.exe" -ArgumentList '--smoke-test' -PassThru
           if (!$app.WaitForExit(30000)) { $app.Kill(); throw 'Installed app startup timed out.' }
