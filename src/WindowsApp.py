@@ -546,6 +546,10 @@ class MainWindow(QMainWindow):
         if process and process.state() != QProcess.NotRunning:
             if sys.platform == "win32":
                 QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
+                # Restricted Windows accounts may deny taskkill even for our
+                # own worker. QProcess retains the handle needed to stop it.
+                if process.state() != QProcess.NotRunning:
+                    process.kill()
             else:
                 process.kill()
             if not process.waitForFinished(3000):
@@ -913,6 +917,8 @@ class MainWindow(QMainWindow):
                 if sys.platform == "win32":
                     # Include this worker's decoder / this installer's uv children.
                     QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
+                    if process.state() != QProcess.NotRunning:
+                        process.kill()
                     process.waitForFinished(1500)
                     continue
                 process.terminate()

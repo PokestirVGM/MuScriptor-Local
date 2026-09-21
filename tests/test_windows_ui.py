@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QProcess, QSettings
 from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication
 from WindowsApp import MainWindow
@@ -31,6 +31,25 @@ class WindowsUITests(unittest.TestCase):
         self.window.deleteLater()
         self.app.processEvents()
         self.temporary.cleanup()
+
+    def test_windows_return_and_quit_stop_worker_when_taskkill_is_denied(self):
+        # A real child verifies the QProcess-handle fallback, rather than
+        # only asserting that a mocked termination method was called.
+        for action in ('return_to_desktop', 'close'):
+            with self.subTest(action=action):
+                process = QProcess(self.window)
+                process.start(sys.executable, ['-c', 'import time; time.sleep(60)'])
+                self.assertTrue(process.waitForStarted(5000))
+                self.window.worker = process
+                self.window.web_url = 'http://127.0.0.1:8123'
+                try:
+                    with patch('WindowsApp.sys.platform', 'win32'), patch('WindowsApp.QProcess.execute', return_value=1), patch.object(self.window, 'start'):
+                        getattr(self.window, action)()
+                    self.assertEqual(process.state(), QProcess.NotRunning)
+                finally:
+                    process.kill()
+                    process.waitForFinished(3000)
+                    self.window.worker = None
 
     def test_audio_is_staged_without_transcribing(self):
         source = self.folder / 'song.wav'
