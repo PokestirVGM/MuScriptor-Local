@@ -1,4 +1,14 @@
-MuScriptor Local 1.0 Beta — Apple Silicon
+MuScriptor Local 1.0 Beta 3 — Apple Silicon (build 4)
+
+An easy local app for official MuScriptor by Kyutai and Mirelo. It handles
+private Python setup, model downloads, and launching the official web GUI.
+You can use the native desktop controls or the bundled browser interface.
+No Python, Node, terminal commands, or separate web server setup are needed.
+
+The app bundles the launcher, official engine source, and prebuilt web GUI.
+First launch downloads its private runtime and dependencies; selected models
+download into your cache. Internet access and your own Hugging Face model access
+are required for that initial setup. Model weights are not inside the app ZIP.
 
 Download official release assets from:
 https://github.com/PokestirVGM/MuScriptor-Local/releases
@@ -11,6 +21,13 @@ https://github.com/PokestirVGM/MuScriptor-Local/releases
 6. Drop in audio, review the MIDI destination, and change the folder if needed.
 7. Click Transcribe. Cached models work offline after setup.
 
+Or click Open Web GUI to use the bundled official interface in your browser.
+It uses this app's local installation, selected model, and processor; no separate
+web setup is needed. Keep the app open. Return to Desktop stops the web GUI and
+any active web transcription. Web exports use your browser's download location.
+Optional sheet-music export requires MuseScore 4+; audio features may download
+an upstream SoundFont, and server-side synthesis needs FluidSynth.
+
 Requires an Apple Silicon Mac with macOS 14 or later. Model memory requirements
 vary by size. Allow roughly 10 GB for setup with Large, plus room for your audio
 and additional models. Performance and transcription accuracy vary.
@@ -20,7 +37,9 @@ System Settings > Privacy & Security. Obtain the app from the release page above
 
 Your audio stays on your computer. Each model size needs its own Hugging Face
 access and terms acceptance. Downloads display their actual local folder.
-No credentials, recordings, MIDI files, or model weights are included.
+No credentials, personal recordings, personal MIDI files, or model weights are
+included. The official web GUI includes upstream's Headache by Lost Deposit
+example clips. Frontend dependency license notices are bundled with the web GUI.
 
 Wrapper code: MIT. Official MuScriptor code: MIT, copyright Kyutai x Mirelo.
 Model weights: CC BY-NC 4.0 plus the model owner's additional terms.

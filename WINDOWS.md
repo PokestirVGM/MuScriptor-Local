@@ -1,6 +1,8 @@
 # MuScriptor Local 1.0 Beta for Windows
 
-An independent desktop wrapper for the official MuScriptor engine. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM and AMD/Intel GPU acceleration are not included.
+An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, CPU/CUDA dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM and AMD/Intel GPU acceleration are not included. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
+
+For normal use, you do not install Python or Node or run terminal commands. The app manages setup in your user folder and caches the models you download. The installer bundles the app and engine source; first launch downloads the private runtime and selected models, so Internet access and your own Hugging Face model access are needed initially. Optional MuseScore/FluidSynth features have additional requirements.
 
 ## Current development interface
 
@@ -15,6 +17,14 @@ A/B audio has original audio on the left and performance-timing MIDI synthesis o
 Qt tests cover the controls, state transitions, and long paths at the minimum window size. Windows builds use Qt's Windows platform plugin so previews include real system fonts, run these tests at 150% scaling, and provide a **Windows-UI-Previews** artifact showing light and dark ready, options, completion, setup, and download states. Native title bars, Explorer selection, actual display scaling, and GPU/transcription with these new options still need verification on a Windows PC. Follow [the Windows handoff](WINDOWS_HANDOFF.md): build the installer, let the user try it, and obtain their explicit approval before publishing a new beta.
 
 ## Install
+
+### Official web GUI in current builds
+
+Current `main` builds also bundle the official web frontend from the same pinned MuScriptor revision as the engine. Click **Open Web GUI** after downloading a model: it opens in your browser and reuses the app's installation, selected model, and processor. No separate web setup or second transcription-model download is needed. Keep the desktop app open; **Return to Desktop** stops the web server and any active web transcription. Browser exports use browser download settings. Optional playback can fetch a SoundFont, and sheet-music export requires MuseScore 4+.
+
+The older published Windows beta linked below predates the web GUI and current interface. The next installer must be tested and approved before a new Windows beta is published. See [the handoff instructions](WINDOWS_HANDOFF.md).
+
+### Installing the published beta
 
 1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1).
 2. Run the installer. It installs for your account and creates a Start Menu shortcut and uninstaller; administrator access is not required.

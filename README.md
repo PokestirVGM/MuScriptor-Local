@@ -1,20 +1,30 @@
 # MuScriptor Local
 
-A desktop app for turning audio into MIDI with the official [MuScriptor](https://github.com/muscriptor/muscriptor) engine. Transcription runs locally on your computer. This is an independent community wrapper, not an official Kyutai or Mirelo application.
+An easy way to run official [MuScriptor](https://github.com/muscriptor/muscriptor) locally as a desktop app. MuScriptor Local handles the private Python environment, model downloads, and switching between Small, Medium, and Large. Transcribe through the native app or open the official web GUI with one click, using the same local model and processor.
 
-**[Download Windows 1.0 Beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1)** · **[Download the macOS beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.2)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
+This is an independent community launcher for MuScriptor by Kyutai and Mirelo. Audio processing stays on your computer.
+
+**[Download Windows 1.0 Beta](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.1)** · **[Download macOS 1.0 Beta 3](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
 ## Platform status
 
 | Platform | Status |
 | --- | --- |
-| macOS 14+ on Apple Silicon | Public 1.0 beta |
+| macOS 14+ on Apple Silicon | Beta 3, including the local web GUI |
 | Windows 10/11 x64 | [1.0 Beta — installation and limitations](WINDOWS.md) |
 | Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
+## One app handles setup
+
+The app bundles its native interface, official engine source, prebuilt official web GUI, and license notices. It installs and manages its own Python environment and dependencies in your user folder. You do not need to install Python or Node, run terminal commands, or set up a web server to use the app.
+
+The app provides a self-contained setup and launch workflow. First launch downloads the private runtime and dependencies; the app downloads each model when you choose it and keeps it cached for future use. You supply your own Hugging Face access and accept each model's terms. After setup, cached audio-to-MIDI transcription runs locally without Internet access.
+
+Optional score engraving and audio synthesis have additional upstream requirements, described below. Basic MIDI transcription and opening the bundled web GUI need no separate web setup.
+
 ## Install on macOS
 
-1. Download **MuScriptor Local - Apple Silicon.zip** from [Releases](https://github.com/PokestirVGM/MuScriptor-Local/releases).
+1. Download **MuScriptor-Local-1.0-Beta-3-macOS-Apple-Silicon.zip** from the [macOS Beta 3 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3).
 2. Unzip it, move **MuScriptor Local.app** into Applications, and open it.
 3. Let the app install its private Python environment. First setup requires Internet access.
 4. Choose **Small**, **Medium**, or **Large**. Open the selected model’s terms link and accept its conditions with your Hugging Face account.
@@ -67,9 +77,11 @@ Audio and inference stay on the computer. Setup and updates download software an
 
 ### One-click local web GUI
 
+The browser interface is the official MuScriptor frontend, built from the same pinned upstream revision as the bundled engine. Its audio requests go to the app's local backend on this computer. The native app provides installation, model management, and a simpler desktop workflow around those same official tools.
+
 After downloading a model, click **Open Web GUI** in the app. The official MuScriptor interface opens in your browser using the same private Python installation, cached model, and selected processor. No terminal commands, Node installation, separate token, or second model download are needed. The app waits until the local server is ready before opening the browser; clicking again reopens the same session.
 
-Keep the desktop app open. **Return to Desktop** stops the web server and any active web transcription, then restores the desktop controls. Only one interface owns the model at a time. Browser-generated files use your browser's download/save location, independently of the desktop MIDI destination.
+Keep the desktop app open. **Return to Desktop** stops the web server and any active web transcription, then restores the desktop controls. Only one interface owns the model at a time. Choose transcription options in the interface you are using. Browser-generated files use your browser's download/save location, independently of the desktop MIDI destination.
 
 The bundled web GUI has analytics and remote font loading disabled. Upstream's browser playback may download and cache its SoundFont on first use; tempo detection can download the optional tempo helper. Sheet-music export still requires MuseScore 4+, and server-side audio rendering requires FluidSynth. These optional upstream features are separate from opening the GUI and transcribing to MIDI.
 

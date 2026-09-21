@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0 Beta 3 for macOS — 2026-09-20
+
+- Add one-click access to the bundled official web GUI using the desktop's local installation, selected model, and processor; Return to Desktop stops the web session.
+- Add instrument filtering, optional notation quantization, and optional A/B audio rendering to the macOS release.
+- Bundle frontend license notices, disable web analytics and remote font loading, and restrict the web server to this computer.
+- Refresh the installed worker and web assets when upgrading; exclude build caches and stale files from release packages.
+- Keep Windows releases separate and preserve earlier macOS downloads.
+
 ## 1.0 Beta for Windows — 2026-09-20
 
 - Add a per-user Windows x64 setup installer and portable ZIP, with a redesigned MuScriptor Local desktop interface.

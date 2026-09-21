@@ -3,6 +3,7 @@ set -euo pipefail
 cd "${0:A:h:h}"
 .venv/bin/python tools/build-web.py
 APP="$PWD/build/MuScriptor Local.app"
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build/module-cache
 /usr/bin/swiftc -O -target arm64-apple-macosx14.0 -module-cache-path "$PWD/build/module-cache" src/App.swift -o "$APP/Contents/MacOS/MuScriptor Local" -framework AppKit -framework SwiftUI
 mkdir -p "$APP/Contents/Resources/engine/upstream"
@@ -14,10 +15,14 @@ mkdir -p "$APP/Contents/Resources/Legal/licenses"
 cp LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md "$APP/Contents/Resources/Legal/"
 cp licenses/MuScriptor-MIT.txt "$APP/Contents/Resources/Legal/licenses/"
 .venv/bin/python - "$APP" "$PWD" <<'PY'
-import plistlib, sys
+import plistlib, shutil, sys
 from pathlib import Path
 app, root = sys.argv[1:]
-info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='3', CFBundleGetInfoString='1.0 Beta', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='MuScriptor Local contributors. Engine: Kyutai x Mirelo. Code: MIT. Model weights: separate license.')
+info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='4', CFBundleGetInfoString='1.0 Beta 3', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='MuScriptor Local contributors. Engine: Kyutai x Mirelo. Code: MIT. Model weights: separate license.')
+for cache in Path(app, 'Contents/Resources/engine').rglob('__pycache__'):
+    shutil.rmtree(cache)
+for bytecode in Path(app, 'Contents/Resources/engine').rglob('*.pyc'):
+    bytecode.unlink()
 Path(app, 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 PY
 /usr/bin/codesign --force --sign - "$APP"

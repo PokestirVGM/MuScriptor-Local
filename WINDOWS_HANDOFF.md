@@ -6,7 +6,7 @@ Use **`main`** for both Windows and macOS. The old `codex/windows-preview` work 
 
 For a new chat on another computer:
 
-> Clone or update https://github.com/PokestirVGM/MuScriptor-Local to the latest main, preserving local changes. Read WINDOWS_HANDOFF.md, build and test the final Windows installer, and let me install and try it. Then ask for my explicit approval before publishing the new Windows 1.0 beta on GitHub. Preserve the current Mac-matched UI and existing macOS release; push all source changes.
+> Clone or update https://github.com/PokestirVGM/MuScriptor-Local to the latest main, preserving local changes. Read WINDOWS_HANDOFF.md. Build and test the final Windows installer with the current UI, automatic local setup, model downloads, and one-click official web GUI. Let me install and try it, then ask for my explicit approval before publishing a new Windows 1.0 beta. Preserve macOS Beta 3 and push all source changes.
 
 ## What is already integrated
 
