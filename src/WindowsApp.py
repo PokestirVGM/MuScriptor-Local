@@ -7,11 +7,12 @@ from pathlib import Path
 import shutil
 import sys
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, QTimer, Qt, QUrl
+from PySide6.QtCore import QProcess, QProcessEnvironment, QRectF, QSettings, QTimer, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QLayout, QMainWindow, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QLayout, QMainWindow, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
+    QStyleOptionButton, QVBoxLayout, QWidget,
 )
 
 
@@ -49,15 +50,15 @@ class Waveform(QWidget):
     """Small vector waveform, independent of platform icon fonts."""
     def __init__(self):
         super().__init__()
-        self.setFixedSize(42, 36)
+        self.setFixedSize(28, 36)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(self.palette().text().color(), 2, Qt.SolidLine, Qt.RoundCap))
-        for i, height in enumerate((8, 18, 30, 20, 12, 26, 10)):
-            x = 3 + i * 6
+        painter.setPen(QPen(self.palette().text().color(), 1.5, Qt.SolidLine, Qt.RoundCap))
+        for i, height in enumerate((6, 18, 28, 20, 8, 14)):
+            x = 2 + i * 5
             painter.drawLine(x, (36 - height) // 2, x, (36 + height) // 2)
 
 
@@ -66,20 +67,69 @@ class AudioDropButton(QPushButton):
         super().__init__()
         self.setObjectName("audioDrop")
         self.setAccessibleName("Choose audio or drop an audio file")
-        self.setMinimumHeight(155)
+        self.setFixedHeight(155)
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 20, 16, 20)
+        layout.setSpacing(10)
         layout.addWidget(Waveform(), 0, Qt.AlignHCenter)
         for text, role in (("Drop an audio file here", "heading"),
                            ("or click to choose", "secondary"),
-                           ("MP3 · WAV · FLAC · M4A / AAC", "caption")):
+                           ("MP3 · WAV · FLAC · M4A / AAC", "tertiary")):
             child = styled_label(text, role)
             child.setAlignment(Qt.AlignCenter)
             child.setAttribute(Qt.WA_TransparentForMouseEvents)
             layout.addWidget(child)
 
+    def paintEvent(self, event):
+        # Qt's stylesheet dashes are dotted on some hosts; match the Mac stroke.
+        dark = self.window().palette().window().color().lightness() < 128
+        active = self.isEnabled() and (self.underMouse() or self.hasFocus() or self.property("dragging"))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor("#22292d" if dark else "#f4f5f5"))
+        pen = QPen(QColor("#479aff" if active else ("#474e52" if dark else "#c9cdd0")), 1.5)
+        pen.setDashPattern([4, 3])
+        painter.setPen(pen)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 14, 14)
 
 
+class OptionCheckBox(QCheckBox):
+    """Keep Qt's input/accessibility behavior with a consistent rounded indicator."""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, option, self)
+        dark = self.window().palette().window().color().lightness() < 128
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            painter.setOpacity(0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#479aff" if self.isChecked() else ("#3a4246" if dark else "#dedfe1")))
+        painter.drawRoundedRect(QRectF(indicator), 5, 5)
+        if self.isChecked():
+            painter.setPen(QPen(QColor("white"), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            x, y = indicator.x(), indicator.y()
+            painter.drawLine(x + 4, y + 8, x + 7, y + 11)
+            painter.drawLine(x + 7, y + 11, x + 12, y + 5)
+
+
+class CompletionMark(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(38, 38)
+        self.setAccessibleName("Completed")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#32b65a"))
+        painter.drawEllipse(1, 1, 36, 36)
+        painter.setPen(QPen(QColor("white"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(10, 19, 16, 25)
+        painter.drawLine(16, 25, 28, 12)
 
 class MainWindow(QMainWindow):
     def __init__(self, root=None, autostart=True, settings=None):
@@ -105,7 +155,8 @@ class MainWindow(QMainWindow):
         self.selected_instruments = []
         self.soundfont = None
         self.ab_result = None
-        self.setWindowTitle("MuScriptor Local — Windows 1.0 Beta")
+        self.backend = "Detecting processor…"
+        self.setWindowTitle("MuScriptor Local")
         self.resize(560, 760)
         self.setMinimumSize(520, 600)
         self.setAcceptDrops(True)
@@ -117,10 +168,13 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         body = QWidget()
         body.setObjectName("content")
+        # Let the scroll area use the wrapped height at the actual viewport width.
+        # A fixed layout minimum otherwise includes several screens of blank space.
+        body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         self.layout = QVBoxLayout(body)
-        self.layout.setContentsMargins(28, 28, 28, 28)
+        self.layout.setContentsMargins(22, 28, 22, 22)
         self.layout.setSpacing(20)
-        self.layout.setSizeConstraint(QLayout.SetMinAndMaxSize)
+        self.layout.setSizeConstraint(QLayout.SetNoConstraint)
         self.layout.addWidget(styled_label("AUDIO → MIDI", "title"))
 
         model_section, model_layout = panel("plain")
@@ -128,7 +182,7 @@ class MainWindow(QMainWindow):
         model_header = QHBoxLayout()
         model_header.addWidget(styled_label("Model", "heading"))
         model_header.addStretch()
-        self.cache_status = styled_label()
+        self.cache_status = styled_label("", "caption")
         model_header.addWidget(self.cache_status)
         model_layout.addLayout(model_header)
         # Retain the model selection API and signals, presenting it as segments.
@@ -142,8 +196,9 @@ class MainWindow(QMainWindow):
         self.model_segments = QWidget()
         self.model_segments.setObjectName("segments")
         segments = QHBoxLayout(self.model_segments)
-        segments.setContentsMargins(3, 3, 3, 3)
-        segments.setSpacing(2)
+        segments.setContentsMargins(0, 0, 0, 0)
+        segments.setSpacing(0)
+        self.model_segments.setFixedSize(210, 24)
         self.model_buttons = QButtonGroup(self)
         self.model_buttons.setExclusive(True)
         for index, size in enumerate(("Small", "Medium", "Large")):
@@ -153,7 +208,7 @@ class MainWindow(QMainWindow):
             self.model_buttons.addButton(button, index)
             segments.addWidget(button)
         self.model_buttons.idClicked.connect(self.model.setCurrentIndex)
-        model_layout.addWidget(self.model_segments)
+        model_layout.addWidget(self.model_segments, 0, Qt.AlignLeft)
         model_layout.addWidget(styled_label("Small uses less memory · Medium balances size and accuracy · Large favors accuracy", "caption"))
         self.layout.addWidget(model_section)
 
@@ -166,8 +221,11 @@ class MainWindow(QMainWindow):
         busy_layout.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
-        self.progress.setFormat("%p%")
+        self.progress.setTextVisible(False)
         busy_layout.addWidget(self.progress)
+        self.progress_caption = styled_label("", "caption")
+        self.progress_caption.setAlignment(Qt.AlignCenter)
+        busy_layout.addWidget(self.progress_caption)
         self.layout.addWidget(self.busy_widget)
 
         self.setup_widget, setup_layout = panel()
@@ -211,9 +269,7 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(self.source_widget)
 
         self.complete_widget, complete_layout = panel("plain", 12)
-        check = styled_label("✓", "success")
-        check.setAlignment(Qt.AlignCenter)
-        complete_layout.addWidget(check)
+        complete_layout.addWidget(CompletionMark(), 0, Qt.AlignHCenter)
         complete = styled_label("Transcription complete", "heading")
         complete.setAlignment(Qt.AlignCenter)
         complete_layout.addWidget(complete)
@@ -237,7 +293,7 @@ class MainWindow(QMainWindow):
         complete_layout.addWidget(self.another_button, 0, Qt.AlignHCenter)
         self.layout.addWidget(self.complete_widget)
 
-        self.options_widget, options = panel()
+        self.options_widget, options = panel(spacing=11)
         options.addWidget(styled_label("Instruments", "heading"))
         options.addWidget(styled_label("Leave empty to detect any supported instrument.", "caption"))
         self.selected_widget = QWidget()
@@ -246,6 +302,7 @@ class MainWindow(QMainWindow):
         self.selected_layout.setSpacing(6)
         options.addWidget(self.selected_widget)
         self.instrument_search = QLineEdit()
+        self.instrument_search.setObjectName("instrumentSearch")
         self.instrument_search.setPlaceholderText("Search instruments")
         self.instrument_search.setAccessibleName("Search instruments")
         self.instrument_search.textChanged.connect(self.update_instruments)
@@ -260,10 +317,10 @@ class MainWindow(QMainWindow):
         self.instrument_layout.setSpacing(2)
         choices.setWidget(self.instrument_list)
         options.addWidget(choices)
-        self.quantize = QCheckBox("Quantize MIDI for notation")
+        self.quantize = OptionCheckBox("Quantize MIDI for notation")
         options.addWidget(self.quantize)
         options.addWidget(styled_label("Off keeps performance timing. Both modes use upstream onset correction when a usable beat grid is detected.", "caption"))
-        self.create_ab = QCheckBox("Create A/B audio render")
+        self.create_ab = OptionCheckBox("Create A/B audio render")
         self.create_ab.toggled.connect(self.refresh)
         options.addWidget(self.create_ab)
         self.soundfont_widget, soundfont_layout = panel("plain")
@@ -277,7 +334,8 @@ class MainWindow(QMainWindow):
         options.addWidget(self.soundfont_widget)
         self.layout.addWidget(self.options_widget)
 
-        self.ab_widget, ab_layout = panel()
+        self.ab_widget, ab_layout = panel("plain")
+        ab_layout.setContentsMargins(0, 0, 0, 0)
         ab_layout.addWidget(styled_label("A/B audio saved to", "heading"))
         self.ab_path = styled_label("", "path")
         ab_layout.addWidget(self.ab_path)
@@ -315,25 +373,31 @@ class MainWindow(QMainWindow):
         divider.setObjectName("divider")
         divider.setFixedHeight(1)
         self.layout.addWidget(divider)
+        model_folder, folder_layout = panel("plain", 5)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_layout.addWidget(styled_label("Model download folder", "captionHeading"))
+        self.model_path = styled_label("Checking…", "path")
+        folder_layout.addWidget(self.model_path)
+        self.layout.addWidget(model_folder)
+        self.footer = styled_label("Audio stays on this PC", "caption")
+        self.layout.addWidget(self.footer)
+        self.hardware = styled_label("Detecting available processors…", "caption")
+        self.layout.addWidget(self.hardware)
+        processor, processor_layout = panel("plain", 8)
+        processor_layout.setContentsMargins(0, 0, 0, 0)
         self.processor_toggle = QPushButton("▸ Processor settings")
         self.processor_toggle.setObjectName("link")
         self.processor_toggle.setCheckable(True)
         self.processor_toggle.toggled.connect(self.refresh)
-        self.layout.addWidget(self.processor_toggle, 0, Qt.AlignLeft)
+        processor_layout.addWidget(self.processor_toggle, 0, Qt.AlignLeft)
         self.device = QComboBox()
         self.device.addItem("Automatic", "auto")
         self.device.setAccessibleName("Processor")
         self.device.currentIndexChanged.connect(self.select_device)
-        self.layout.addWidget(self.device)
-        self.hardware = styled_label("Detecting available processors…", "caption")
-        self.layout.addWidget(self.hardware)
+        processor_layout.addWidget(self.device)
         self.memory_note = styled_label("Memory figures show total capacity, not free memory.", "caption")
-        self.layout.addWidget(self.memory_note)
-        self.layout.addWidget(styled_label("Model download folder", "caption"))
-        self.model_path = styled_label("Checking…", "path")
-        self.layout.addWidget(self.model_path)
-        self.footer = styled_label("Audio stays on this PC", "caption")
-        self.layout.addWidget(self.footer)
+        processor_layout.addWidget(self.memory_note)
+        self.layout.addWidget(processor)
         self.layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -350,8 +414,9 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         dark = self.palette().window().color().lightness() < 128
-        bg, card, field = ("#202124", "#292a2e", "#33353a") if dark else ("#fafafa", "#f1f1f3", "#ffffff")
-        text, muted, border = ("#f0f0f2", "#b3b5bc", "#45474e") if dark else ("#25262a", "#666973", "#d4d5da")
+        bg, card, field = ("#1e2528", "#242a2e", "#1e2528") if dark else ("#fafafa", "#f1f2f2", "#ffffff")
+        text, muted, border = ("#dedfe0", "#a4a7a9", "#363d41") if dark else ("#25262a", "#666973", "#d4d5da")
+        segment, selected = ("#30373b", "#474e52") if dark else ("#e5e6e7", "#ffffff")
         accent = "#479aff" if dark else "#007aff"
         self.setStyleSheet(f"""
             QMainWindow, QWidget#content {{ background: {bg}; }}
@@ -360,11 +425,12 @@ class MainWindow(QMainWindow):
             QLabel#title {{ font-size: 25px; font-weight: 600; }}
             QLabel#heading {{ font-size: 13px; font-weight: 600; }}
             QLabel#secondary, QLabel#caption, QLabel#path {{ color: {muted}; }}
-            QLabel#caption, QLabel#path {{ font-size: 11px; }}
-            QLabel#path {{ font-family: 'Consolas', monospace; }}
+            QLabel#caption, QLabel#path, QLabel#captionHeading, QLabel#tertiary {{ font-size: 11px; }}
+            QLabel#captionHeading {{ font-weight: 600; }}
+            QLabel#tertiary {{ color: {'#707679' if dark else '#85898c'}; }}
+            QLabel#path {{ font-family: {'Consolas' if sys.platform == 'win32' else 'Menlo'}; }}
             QLabel#error {{ color: {'#ff8585' if dark else '#bd3035'}; }}
             QLabel#warning {{ color: {'#ffc46b' if dark else '#925500'}; }}
-            QLabel#success {{ color: #32a852; font-size: 38px; }}
             QWidget#card {{ background: {card}; border-radius: 12px; }}
             QWidget#plain, QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
             QWidget#divider {{ background: {border}; }}
@@ -374,18 +440,33 @@ class MainWindow(QMainWindow):
             QPushButton:disabled, QCheckBox:disabled, QComboBox:disabled {{ color: {muted}; }}
             QPushButton#primary {{ background: {accent}; border: 1px solid {accent}; color: white; font-weight: 500; padding: 7px 14px; }}
             QPushButton#primary:disabled {{ background: {border}; border-color: {border}; color: {muted}; }}
-            QPushButton#link, QPushButton#instrument {{ background: transparent; border: 1px solid transparent; color: {accent}; padding: 3px 0; text-align: left; }}
-            QPushButton#link:hover, QPushButton#instrument:hover {{ color: {text}; }}
-            QPushButton#audioDrop {{ background: {card}; border: 1px dashed {border}; border-radius: 14px; }}
+            QPushButton#link {{ background: transparent; border: 1px solid transparent; color: {accent}; padding: 3px 0; text-align: left; }}
+            QPushButton#link:hover {{ color: {text}; }}
+            QPushButton#instrument {{ background: transparent; border: 1px solid transparent; color: {text}; padding: 4px 0; text-align: left; }}
+            QPushButton#instrument:hover {{ background: {segment}; }}
+            QPushButton#instrument:focus, QPushButton#link:focus {{ border-color: {accent}; }}
+            QPushButton#audioDrop {{ background: {'#22292d' if dark else '#f4f5f5'}; border: 1px dashed {selected if dark else border}; border-radius: 14px; padding: 0; }}
             QPushButton#audioDrop:hover, QPushButton#audioDrop[dragging="true"] {{ border: 1px dashed {accent}; background: {field}; }}
-            QWidget#segments {{ background: {card}; border: 1px solid {border}; border-radius: 7px; }}
-            QPushButton#segment {{ background: transparent; border: 1px solid transparent; padding: 4px; }}
-            QPushButton#segment:checked {{ background: {field}; border-color: {border}; }}
+            QWidget#segments {{ background: {segment}; border: none; border-radius: 5px; }}
+            QPushButton#segment {{ background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px 0; font-weight: 500; }}
+            QPushButton#segment:checked {{ background: {selected}; }}
             QPushButton#segment:focus {{ border-color: {accent}; }}
-            QPushButton#selected {{ background: {field}; border: 1px solid {border}; text-align: left; }}
+            QPushButton#selected {{ background: rgba(71, 154, 255, 25); border: 1px solid transparent; border-radius: 7px; padding: 0; }}
+            QPushButton#selected:focus {{ border-color: {accent}; }}
             QLineEdit, QComboBox {{ background: {field}; border: 1px solid {border}; border-radius: 5px; padding: 5px 7px; }}
+            QLineEdit#instrumentSearch {{ padding: 3px 5px; }}
             QCheckBox {{ spacing: 7px; background: transparent; }}
-            QCheckBox::indicator:unchecked {{ width: 12px; height: 12px; border: 1px solid {border}; border-radius: 3px; background: {field}; }}
+            QCheckBox::indicator {{ width: 16px; height: 16px; }}
+            QCheckBox::indicator:unchecked {{ border: none; border-radius: 5px; background: {'#3a4246' if dark else '#dedfe1'}; }}
+            QCheckBox::indicator:unchecked:hover {{ background: {selected}; }}
+            QCheckBox:focus {{ outline: 1px solid {accent}; }}
+            QScrollBar:vertical {{ background: {segment}; width: 10px; border-radius: 5px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {'#999d9f' if dark else '#a6aaad'}; border-radius: 5px; min-height: 20px; }}
+            QScrollBar::handle:vertical:hover {{ background: {muted}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; border: none; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            QMenuBar, QMenu {{ background: {bg}; color: {text}; }}
+            QMenuBar::item:selected, QMenu::item:selected {{ background: {segment}; }}
             QProgressBar {{ background: {card}; border: 1px solid {border}; border-radius: 5px; text-align: center; min-height: 12px; }}
             QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
         """)
@@ -411,6 +492,8 @@ class MainWindow(QMainWindow):
         self.busy_filename.setText(self.source.name if self.source else "")
         self.busy_filename.setVisible(self.source is not None)
         self.busy_widget.setVisible(self.busy)
+        self.progress_caption.setVisible(self.progress.maximum() > 0)
+        self.progress_caption.setText(f"{max(0, self.progress.value()) / 10:.0f}%")
         self.transcribe_button.setText("Transcribe with " + self.model.currentData().title())
         self.transcribe_button.setVisible(not self.busy and self.source is not None and self.result is None)
         self.transcribe_button.setEnabled(not self.busy and not self.setup and self.destination is not None)
@@ -427,7 +510,7 @@ class MainWindow(QMainWindow):
         self.processor_toggle.setText(("▾" if expanded else "▸") + " Processor settings")
         self.device.setVisible(expanded)
         self.memory_note.setVisible(expanded)
-        self.footer.setText("MuScriptor " + self.model.currentData().title() + " · Audio stays on this PC")
+        self.footer.setText("MuScriptor " + self.model.currentData().title() + " • " + self.backend + " • Audio stays on this PC")
 
     @staticmethod
     def clear_layout(layout):
@@ -442,9 +525,15 @@ class MainWindow(QMainWindow):
         self.clear_layout(self.instrument_layout)
         self.selected_widget.setVisible(bool(self.selected_instruments))
         for name in self.selected_instruments:
-            button = QPushButton(name.replace("_", " ").title() + "    ×")
+            button = QPushButton()
             button.setObjectName("selected")
             button.setAccessibleName("Remove " + name.replace("_", " "))
+            row = QHBoxLayout(button)
+            row.setContentsMargins(7, 5, 7, 5)
+            for text, stretch in ((name.replace("_", " ").title(), 1), ("×", 0)):
+                child = label(text)
+                child.setAttribute(Qt.WA_TransparentForMouseEvents)
+                row.addWidget(child, stretch)
             button.clicked.connect(lambda checked=False, name=name: self.remove_instrument(name))
             self.selected_layout.addWidget(button)
         query = self.instrument_search.text().strip().casefold()
@@ -546,7 +635,8 @@ class MainWindow(QMainWindow):
     def receive(self, event):
         kind = event["type"]
         if kind == "backend":
-            self.hardware.setText("Using " + event["device"] + "\n" + event.get("detail", ""))
+            self.backend = event["device"]
+            self.hardware.setText(event.get("detail", ""))
             self.device.blockSignals(True)
             self.device.clear()
             self.device.addItem("Automatic", "auto")

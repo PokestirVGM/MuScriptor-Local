@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication
 from WindowsApp import MainWindow
 
@@ -64,8 +65,9 @@ class WindowsUITests(unittest.TestCase):
             self.window.device.setCurrentIndex(self.window.device.findData('cpu'))
             self.assertEqual(send.call_args.args[0], dict(action='select_device', device='cpu'))
         self.window.receive(dict(type='backend', device='CPU', device_id='cpu', requested_device='auto', detail='Test Processor', devices=[dict(id='cpu', backend='CPU', name='Test Processor')]))
-        self.assertIn('Using CPU', self.window.hardware.text())
-        self.assertNotIn('Using NVIDIA', self.window.hardware.text())
+        self.assertIn('CPU', self.window.footer.text())
+        self.assertNotIn('NVIDIA', self.window.footer.text())
+        self.assertEqual(self.window.hardware.text(), 'Test Processor')
 
     def test_busy_locks_model_device_and_destination(self):
         self.window.busy = True
@@ -157,26 +159,59 @@ class WindowsUITests(unittest.TestCase):
         self.app.processEvents()
         self.assertGreaterEqual(self.window.centralWidget().viewport().width(), 500)
         self.assertLessEqual(self.window.model_segments.width(), self.window.centralWidget().viewport().width())
-        if os.environ.get('MUSCRIPTOR_UI_PREVIEW_DIR'):
-            from PySide6.QtGui import QPixmap
+        # Long Windows paths must wrap inside the page, including at minimum size.
+        self.window.model_path.setText('C:/Users/Example/AppData/Local/' + 'a-long-cache-directory-' * 8)
+        self.window.resize(self.window.minimumWidth(), self.window.minimumHeight())
+        self.app.processEvents()
+        self.assertLessEqual(self.window.centralWidget().widget().width(), self.window.centralWidget().viewport().width())
+        self.assertGreaterEqual(self.window.instrument_search.height(), self.window.instrument_search.fontMetrics().height() + 6)
+        content = self.window.centralWidget().widget()
+        self.assertLessEqual(content.height(), max(self.window.centralWidget().viewport().height(), content.heightForWidth(content.width())) + 2)
+
+    @unittest.skipUnless(os.environ.get('MUSCRIPTOR_UI_PREVIEW_DIR'), 'Optional visual review artifacts')
+    def test_visual_review_states(self):
+        original = self.app.palette()
+        try:
             output = Path(os.environ['MUSCRIPTOR_UI_PREVIEW_DIR'])
             output.mkdir(parents=True, exist_ok=True)
-            for state in ('ready', 'options', 'complete'):
-                if state == 'options':
-                    self.window.add_instrument('acoustic_piano')
-                    self.window.add_instrument('drums')
-                    self.window.create_ab.setChecked(True)
-                    self.window.source = Path('C:/Music/Example recording.wav')
-                    self.window.destination = Path('C:/Music/Example recording_transcription.mid')
-                    self.window.refresh()
-                elif state == 'complete':
-                    self.window.receive(dict(type='complete', path='C:/Music/Example recording_transcription.mid', ab_path='C:/Music/Example recording_transcription_AB.wav'))
-                self.app.processEvents()
-                self.app.processEvents()
-                content = self.window.centralWidget().widget()
-                image = QPixmap(content.size())
-                content.render(image)
-                self.assertTrue(image.save(str(output / (state + '.png'))))
+            for theme in ('dark', 'light'):
+                palette = QPalette(original)
+                palette.setColor(QPalette.Window, QColor('#1e2528' if theme == 'dark' else '#fafafa'))
+                self.app.setPalette(palette)
+                self.window.setPalette(palette)
+                self.window.apply_theme()
+                self.window.another()
+                self.window.selected_instruments = []
+                self.window.create_ab.setChecked(False)
+                self.window.processor_toggle.setChecked(False)
+                self.window.receive(dict(type='backend', device='NVIDIA CUDA', detail='NVIDIA GeForce RTX Example · 16 GB dedicated GPU memory', devices=[dict(id='cuda:0', backend='NVIDIA CUDA', name='NVIDIA GeForce RTX Example')]))
+                self.window.receive(dict(type='ready', cached=True, authenticated=True, directory='C:/Users/Example/.cache/huggingface/hub/models--MuScriptor--muscriptor-large', instruments=['acoustic_piano', 'electric_piano', 'chromatic_percussion', 'organ', 'guitar', 'bass', 'drums']))
+                self.window.show()
+                for state in ('ready', 'options', 'complete', 'setup', 'download'):
+                    if state == 'options':
+                        self.window.add_instrument('acoustic_piano')
+                        self.window.add_instrument('drums')
+                        self.window.create_ab.setChecked(True)
+                        self.window.processor_toggle.setChecked(True)
+                        self.window.source = Path('C:/Music/Example recording.wav')
+                        self.window.destination = Path('C:/Music/Example recording_transcription.mid')
+                        self.window.refresh()
+                    elif state == 'complete':
+                        self.window.receive(dict(type='complete', path='C:/Music/Example recording_transcription.mid', ab_path='C:/Music/Example recording_transcription_AB.wav'))
+                    elif state == 'setup':
+                        self.window.another()
+                        self.window.receive(dict(type='ready', cached=False, authenticated=False, directory='C:/Users/Example/.cache/huggingface/hub/models--MuScriptor--muscriptor-large'))
+                    elif state == 'download':
+                        self.window.busy = True
+                        self.window.receive(dict(type='download', completed=1200000000, total=2000000000, directory='C:/Users/Example/.cache/huggingface/hub/models--MuScriptor--muscriptor-large'))
+                    self.app.processEvents()
+                    self.app.processEvents()
+                    content = self.window.centralWidget().widget()
+                    preview = QPixmap(content.size())
+                    content.render(preview)
+                    self.assertTrue(preview.save(str(output / f'{theme}-{state}.png')))
+        finally:
+            self.app.setPalette(original)
 
     def test_save_cancel_keeps_original_result(self):
         original = self.folder / 'song.mid'
