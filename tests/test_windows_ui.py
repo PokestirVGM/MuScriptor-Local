@@ -64,10 +64,12 @@ class WindowsUITests(unittest.TestCase):
         with patch.object(self.window, 'send') as send:
             self.window.device.setCurrentIndex(self.window.device.findData('cpu'))
             self.assertEqual(send.call_args.args[0], dict(action='select_device', device='cpu'))
-        self.window.receive(dict(type='backend', device='CPU', device_id='cpu', requested_device='auto', detail='Test Processor', devices=[dict(id='cpu', backend='CPU', name='Test Processor')]))
+        with patch('WindowsApp.sys.platform', 'win32'):
+            self.window.receive(dict(type='backend', device='CPU', device_id='cpu', requested_device='auto', detail='Test Processor', devices=[dict(id='cpu', backend='CPU', name='Test Processor')]))
         self.assertIn('CPU', self.window.footer.text())
         self.assertNotIn('NVIDIA', self.window.footer.text())
-        self.assertEqual(self.window.hardware.text(), 'Test Processor')
+        self.assertEqual(self.window.hardware.text().splitlines()[0], 'Test Processor')
+        self.assertIn('No CUDA GPU is available', self.window.hardware.text())
 
     def test_busy_locks_model_device_and_destination(self):
         self.window.busy = True
