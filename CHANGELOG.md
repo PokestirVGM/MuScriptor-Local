@@ -4,6 +4,7 @@
 
 - Fix the reported DirectML `Cannot set version_counter for inference tensor` failure by replacing upstream's inference-mode generator decorator with no-gradient execution on DirectML model instances only. Desktop and web transcription share this correction.
 - Recognize that DirectML error for desktop CPU recovery if it occurs elsewhere.
+- Keep waveform padding/collation on CPU and rebuild the DirectML attention cache without nested slice writes, preventing corrupted conditioning and empty MIDI output.
 - Draw readable circle-plus instrument buttons independently of Windows font glyphs.
 - Use the official upstream MuScriptor mark for Windows executable/setup/window icons and the next macOS app bundle. Existing macOS releases remain unchanged.
 - AMD support remains experimental; the corrected build needs retesting on the RX 6800 XT.

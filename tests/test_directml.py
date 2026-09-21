@@ -1,6 +1,7 @@
 """Adapter/routing regression tests. These do not claim real DirectML validation."""
 import contextlib
 import io
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -96,6 +97,51 @@ class DirectMLTests(unittest.TestCase):
         finally:
             hook.remove()
         self.assertIs(type(decoder).generate, original_method)
+
+    def test_streaming_cache_matches_upstream_with_beam_reordering(self):
+        model = self.tiny_model()
+        attention = model._model.transformer.layers[0].self_attn
+        state = attention.init_state(2, 8)
+        worker.move_transcription_to_directml(model, torch.device('cpu'))
+        k, v = torch.randn(2, 3, 2, 8), torch.randn(2, 3, 2, 8)
+        actual_k, actual_v = attention._complete_kv(k, v, state)
+        torch.testing.assert_close(actual_k, k)
+        torch.testing.assert_close(actual_v, v)
+        state['offset'] = 3
+        state['cache'] = state['cache'][:, [1, 0]]
+        next_k, next_v = torch.randn(2, 1, 2, 8), torch.randn(2, 1, 2, 8)
+        actual_k, actual_v = attention._complete_kv(next_k, next_v, state)
+        torch.testing.assert_close(actual_k, torch.cat((k[[1, 0]], next_k), dim=1))
+        torch.testing.assert_close(actual_v, torch.cat((v[[1, 0]], next_v), dim=1))
+
+    def test_audio_preparation_returns_to_cpu_before_chunking(self):
+        model = self.tiny_model()
+        waveform = Mock()
+        waveform.cpu.return_value = torch.arange(16).reshape(1, -1)
+        model._load_wav = Mock(return_value=waveform)
+        original = model._load_wav
+        worker.move_transcription_to_directml(model, torch.device('meta'))
+        actual = model._load_wav('sample.wav', 16000)
+        original.assert_called_once_with('sample.wav', 16000)
+        waveform.cpu.assert_called_once_with()
+        self.assertEqual(actual.device.type, 'cpu')
+        self.assertEqual(actual.shape, (1, 16))
+
+    @unittest.skipUnless(os.environ.get('MUSCRIPTOR_TEST_DIRECTML') == '1', 'opt-in physical DirectML adapters')
+    def test_physical_directml_tokens_match_cpu(self):
+        import torch_directml
+        self.assertGreater(torch_directml.device_count(), 0)
+        for index in range(torch_directml.device_count()):
+            with self.subTest(adapter=index):
+                torch.manual_seed(8)
+                model = self.tiny_model()
+                args = dict(max_gen_len=8, use_sampling=False, cfg_coef=1.0)
+                expected = [t.clone() for t in model._model.generate(**args)]
+                worker.move_transcription_to_directml(model, torch_directml.device(index))
+                actual = [t.cpu() for t in model._model.generate(**args)]
+                self.assertEqual(len(actual), len(expected))
+                for got, wanted in zip(actual, expected):
+                    torch.testing.assert_close(got, wanted, rtol=0, atol=0)
 
     def test_automatic_prefers_discrete_radeon_over_integrated_adapter(self):
         devices = [dict(id="privateuseone:0", default=True, discrete=False),

@@ -323,6 +323,7 @@ def move_transcription_to_directml(model, device):
     """
     import torch
     from types import MethodType
+    from muscriptor.modules.transformer import StreamingMultiheadAttention
 
     # The pinned upstream generator uses inference_mode. DirectML 0.2.5
     # cannot update version counters for its inference tensors during linear
@@ -331,6 +332,21 @@ def move_transcription_to_directml(model, device):
     generate = type(model._model).generate.__wrapped__
     generate = torch.inference_mode(False)(torch.no_grad()(generate))
     model._model.generate = MethodType(generate, model._model)
+
+    def complete_kv(module, k, v, state):
+        if state is None:
+            return k, v
+        # DirectML's nested slice assignment does not update the parent cache.
+        # Rebuild the used prefix explicitly, preserving upstream's cache shape
+        # and offset contract (including beam reordering) without NaN padding.
+        new = torch.stack((k, v))
+        end = state["offset"]
+        state["cache"] = torch.cat((state["cache"][:, :, :end], new), dim=2) if end else new
+        return state["cache"][0], state["cache"][1]
+
+    for module in model._model.modules():
+        if isinstance(module, StreamingMultiheadAttention):
+            module._complete_kv = MethodType(complete_kv, module)
 
     for name, module in model._model.named_children():
         if name != "condition_provider":
@@ -341,6 +357,12 @@ def move_transcription_to_directml(model, device):
                 for key, (condition, mask) in output.items()}
 
     model._model.condition_provider.register_forward_hook(transfer_conditions)
+    if hasattr(model, "_load_wav"):
+        load_wav = model._load_wav
+        # Collation/padding must also stay on CPU, before the CPU spectrogram.
+        def load_cpu_wav(*args, **kwargs):
+            return load_wav(*args, **kwargs).cpu()
+        model._load_wav = load_cpu_wav
     model._device = device
     return model
 

@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--model", choices=worker.MODELS, default="small")
     parser.add_argument("--device", help="Adapter ID shown by the worker, e.g. privateuseone:1")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--require-notes", action="store_true", help="Fail on empty MIDI when testing known musical audio")
     args = parser.parse_args()
     devices = worker.directml_devices()
     if not devices:
@@ -38,8 +39,14 @@ def main():
     completed = [event for event in events if event["type"] == "complete"]
     if not completed:
         raise SystemExit("FAILED: no completed MIDI was reported.")
+    import mido
+    midi = mido.MidiFile(completed[-1]["path"])
+    notes = sum(message.type == "note_on" and message.velocity > 0 for track in midi.tracks for message in track)
+    if args.require_notes and not notes:
+        raise SystemExit("FAILED: DirectML returned an empty MIDI for the musical test input.")
     print(json.dumps(dict(result="completed on DirectML", model=args.model, device=selected,
                           gpu=next(d["name"] for d in devices if d["id"] == selected),
+                          note_count=notes, midi_seconds=round(midi.length, 2),
                           elapsed_seconds=round(time.perf_counter() - start, 2),
                           midi=completed[-1]["path"])))
 
