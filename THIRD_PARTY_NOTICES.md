@@ -1,5 +1,7 @@
 # Third-party notices
 
+The optional local web GUI bundles the official MuScriptor frontend, including React, Tone.js, SpessaSynth, fflate, clsx, and their production dependencies. Their exact versions and full license notices ship in `upstream/muscriptor/web_dist/THIRD_PARTY_LICENSES.txt` inside the app's engine resources and are also served at `/THIRD_PARTY_LICENSES.txt` by the local web GUI. The build uses the upstream lockfile, disables analytics, and removes remote font links from the generated HTML; upstream source is preserved.
+
 ## Wrapper
 
 MuScriptor Local's own source code is licensed under the MIT License in `LICENSE`. This license applies to the wrapper, not to third-party software or model weights. This community application is not an official Kyutai or Mirelo product.

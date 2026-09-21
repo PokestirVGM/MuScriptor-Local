@@ -63,7 +63,15 @@ The pinned engine in `upstream-revision.txt` provides the supported APIs used he
 
 The macOS app prefers **Apple MPS** and displays the selected backend. Recognized MPS failures restart the complete song on CPU with a visible notice. Unrelated audio errors do not silently switch processors.
 
-Audio and inference stay on the computer. Setup and updates download software and models from their providers. Hugging Face credentials are stored by its client and sent to Hugging Face for authentication; the app does not include credentials in release downloads or command-line arguments. No hosted inference service, local web server, or app analytics is used. After setup and model download, cached models can transcribe offline. See [PRIVACY.md](PRIVACY.md).
+Audio and inference stay on the computer. Setup and updates download software and models from their providers. Hugging Face credentials are stored by its client and sent to Hugging Face for authentication; the app does not include credentials in release downloads or command-line arguments. No hosted inference service or app analytics is used. The optional web GUI runs a server accessible only on this computer. After setup and model download, cached models can transcribe offline. See [PRIVACY.md](PRIVACY.md).
+
+### One-click local web GUI
+
+After downloading a model, click **Open Web GUI** in the app. The official MuScriptor interface opens in your browser using the same private Python installation, cached model, and selected processor. No terminal commands, Node installation, separate token, or second model download are needed. The app waits until the local server is ready before opening the browser; clicking again reopens the same session.
+
+Keep the desktop app open. **Return to Desktop** stops the web server and any active web transcription, then restores the desktop controls. Only one interface owns the model at a time. Browser-generated files use your browser's download/save location, independently of the desktop MIDI destination.
+
+The bundled web GUI has analytics and remote font loading disabled. Upstream's browser playback may download and cache its SoundFont on first use; tempo detection can download the optional tempo helper. Sheet-music export still requires MuseScore 4+, and server-side audio rendering requires FluidSynth. These optional upstream features are separate from opening the GUI and transcribing to MIDI.
 
 ## Files and storage
 
@@ -90,7 +98,7 @@ To uninstall, quit and trash the app, then remove its private engine folder if n
 
 The macOS interface is Swift/AppKit/SwiftUI; the worker is Python. The pinned upstream revision is recorded in `upstream-revision.txt`, and the macOS environment uses `requirements.lock`.
 
-Clone this repository, fetch the official upstream source into `upstream/` at the recorded revision, and set up the dedicated `.venv`. `tools/bootstrap.sh` is the installer bundled with release builds; `tools/repair.sh` and `tools/update.sh` maintain an existing development environment.
+Clone this repository, fetch the official upstream source into `upstream/` at the recorded revision, and set up the dedicated `.venv`. Building an app also requires Node.js 22+ and pnpm 10.20.0 to bundle the pinned official web frontend; installed-app users do not need these tools. `tools/bootstrap.sh` is the installer bundled with release builds; `tools/repair.sh` and `tools/update.sh` maintain an existing development environment.
 
 - `zsh tools/build.sh` builds a local launcher that points at the checkout.
 - `zsh tools/share.sh` creates a portable app and zip with no checkout-specific installation path.

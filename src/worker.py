@@ -1,4 +1,4 @@
-"""Private JSON-lines bridge to unmodified official MuScriptor. No network server."""
+"""Private bridge to official MuScriptor, with an optional loopback-only web UI."""
 from __future__ import annotations
 
 import contextlib
@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -500,6 +501,64 @@ class Engine:
                  ab_path=str(ab_path) if ab_path else None, quantized=quantized)
 
 
+def local_web_app(model, web_dir, origin):
+    from muscriptor.server import create_app
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+    from starlette.responses import PlainTextResponse
+
+    app = create_app(model, web_dir=web_dir)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
+
+    @app.middleware("http")
+    async def same_origin(request, call_next):
+        # Prevent unrelated websites from submitting work to the local engine.
+        if request.headers.get("origin") not in (None, origin):
+            return PlainTextResponse("Use the local web GUI opened by the app.", status_code=403)
+        return await call_next(request)
+
+    return app
+
+
+def open_web_gui(engine):
+    """Hand this worker/model to upstream's server until the desktop restarts it."""
+    import uvicorn
+    if os.name == "posix" and os.getpgrp() != os.getpid():
+        os.setpgid(0, 0)
+    web_dir = Path(__file__).resolve().parents[1] / "upstream/muscriptor/web_dist"
+    if not (web_dir / "index.html").is_file():
+        raise UserError("The bundled web GUI is missing. Install the latest app build.", "web_gui")
+    if cached_weights(engine.model_size) is None:
+        raise UserError("Download the selected model in the app first.", "web_gui")
+    try:
+        engine.load()
+    except Exception as exc:
+        if not device_error(exc, engine.device):
+            raise
+        engine.fallback()
+        engine.load()
+    # Bind before announcing the URL, so another service cannot claim the port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        app = local_web_app(engine.model, web_dir, origin)
+
+        class DesktopServer(uvicorn.Server):
+            def capture_signals(self):
+                # Keep the worker's immediate SIGTERM cleanup on Mac. Returning
+                # to desktop must release this model before another worker starts.
+                return contextlib.nullcontext()
+
+            async def startup(self, sockets=None):
+                await super().startup(sockets=sockets)
+                if self.started:
+                    emit("web_ready", url=origin, model=engine.model_size)
+
+        config = uvicorn.Config(app, host="127.0.0.1", log_config=None, access_log=False, timeout_graceful_shutdown=1)
+        DesktopServer(config).run(sockets=[listener])
+    # Do not resume native inference after an unexpected server shutdown.
+    raise SystemExit(0)
+
+
 def report_error(exc):
     if isinstance(exc, UserError):
         emit("error", message=str(exc), code=exc.code)
@@ -574,6 +633,8 @@ def main():
                 engine.prepare()
             elif action == "prepare":
                 engine.prepare()
+            elif action == "web_gui":
+                open_web_gui(engine)
             elif action == "select_model":
                 engine.select(command["model"])
             elif action == "select_device":

@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
+.venv/bin/python tools/build-web.py
 APP="$PWD/build/MuScriptor Local.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build/module-cache
 /usr/bin/swiftc -O -target arm64-apple-macosx14.0 -module-cache-path "$PWD/build/module-cache" src/App.swift -o "$APP/Contents/MacOS/MuScriptor Local" -framework AppKit -framework SwiftUI

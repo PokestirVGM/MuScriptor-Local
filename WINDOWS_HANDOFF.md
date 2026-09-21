@@ -13,6 +13,7 @@ For a new chat on another computer:
 - The Windows 1.0 beta's fixes for private Python on Windows RedirectionGuard, paths containing spaces, PowerShell quoting, and dependency-repair retries.
 - Local CUDA/CPU selection, actual processor reporting, collision-safe output, and first-run private engine installation.
 - The latest Mac and Windows UI: instrument filtering, optional notation MIDI, optional A/B render, and matching compact layout.
+- **Open Web GUI** launches the bundled official interface with the same cached model and processor. Verify browser launch, model/device reuse, Return to Desktop, and server cleanup when quitting. Browser exports use browser download settings.
 - Default transcription does not fetch an uncached optional tempo helper. Enabling notation quantization explicitly may fetch it; failure preserves performance timing with a warning.
 - The Inno Setup installer, portable package, third-party notices, and Windows build checks now run from main and pull requests targeting main.
 

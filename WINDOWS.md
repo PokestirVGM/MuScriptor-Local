@@ -68,4 +68,4 @@ The [macOS v1.0.0-beta.2 release](https://github.com/PokestirVGM/MuScriptor-Loca
 
 ## Development
 
-Use a dedicated Python 3.12 environment, Git, and Inno Setup 6, then run tools/build-windows.ps1. The Windows preview workflow builds both packages, checks the UI and worker, smoke-tests installation, and tests first-run setup in Windows PowerShell with an engine path containing spaces. Resolved engine dependencies are recorded locally in Engine/runtime/installed-packages.txt.
+Use a dedicated Python 3.12 environment, Git, Node.js 22+, pnpm 10.20.0, and Inno Setup 6, then run tools/build-windows.ps1. Node and pnpm bundle the official web frontend at build time; installed-app users need neither. The Windows workflow builds both packages, checks the UI, local web server, and worker, smoke-tests installation, and tests first-run setup in Windows PowerShell with an engine path containing spaces. Resolved engine dependencies are recorded locally in Engine/runtime/installed-packages.txt.

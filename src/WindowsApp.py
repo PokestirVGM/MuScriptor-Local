@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         self.selected_instruments = []
         self.soundfont = None
         self.ab_result = None
+        self.web_url = None
         self.backend = "Detecting processor…"
         self.setWindowTitle("MuScriptor Local")
         self.resize(560, 760)
@@ -175,7 +176,13 @@ class MainWindow(QMainWindow):
         self.layout.setContentsMargins(22, 28, 22, 22)
         self.layout.setSpacing(20)
         self.layout.setSizeConstraint(QLayout.SetNoConstraint)
-        self.layout.addWidget(styled_label("AUDIO → MIDI", "title"))
+        title_row = QHBoxLayout()
+        title_row.addWidget(styled_label("AUDIO → MIDI", "title"), 1)
+        self.web_button = QPushButton("Open Web GUI")
+        self.web_button.setObjectName("link")
+        self.web_button.clicked.connect(self.open_web_gui)
+        title_row.addWidget(self.web_button)
+        self.layout.addLayout(title_row)
 
         model_section, model_layout = panel("plain")
         model_layout.setContentsMargins(0, 0, 0, 0)
@@ -211,6 +218,14 @@ class MainWindow(QMainWindow):
         model_layout.addWidget(self.model_segments, 0, Qt.AlignLeft)
         model_layout.addWidget(styled_label("Small uses less memory · Medium balances size and accuracy · Large favors accuracy", "caption"))
         self.layout.addWidget(model_section)
+        self.web_widget, web_layout = panel()
+        web_layout.addWidget(styled_label("Web GUI running locally", "heading"))
+        web_layout.addWidget(styled_label("Using this app’s selected model and processor. Keep the app open while using your browser."))
+        web_layout.addWidget(styled_label("Web downloads use your browser’s save location. Returning to desktop stops the web GUI and any active web transcription.", "caption"))
+        self.desktop_button = QPushButton("Return to Desktop")
+        self.desktop_button.clicked.connect(self.return_to_desktop)
+        web_layout.addWidget(self.desktop_button, 0, Qt.AlignLeft)
+        self.layout.addWidget(self.web_widget)
 
         self.busy_widget, busy_layout = panel("plain", 12)
         self.busy_filename = styled_label("", "heading")
@@ -474,9 +489,11 @@ class MainWindow(QMainWindow):
     def refresh(self):
         for widget in (self.model, self.model_segments, self.device, self.audio_button,
                        self.change_audio, self.folder_button, self.options_widget):
-            widget.setEnabled(not self.busy)
+            widget.setEnabled(not self.busy and self.web_url is None)
+        self.web_button.setEnabled(not self.busy and not self.setup)
+        self.web_widget.setVisible(self.web_url is not None)
         self.model_buttons.button(self.model.currentIndex()).setChecked(True)
-        self.repair_action.setEnabled(not self.busy)
+        self.repair_action.setEnabled(not self.busy and self.web_url is None)
         self.setup_widget.setVisible(self.setup and not self.busy and self.result is None)
         self.setup_heading.setText("Set up MuScriptor " + self.model.currentData().title())
         self.token.setVisible(not self.authenticated)
@@ -511,6 +528,32 @@ class MainWindow(QMainWindow):
         self.device.setVisible(expanded)
         self.memory_note.setVisible(expanded)
         self.footer.setText("MuScriptor " + self.model.currentData().title() + " • " + self.backend + " • Audio stays on this PC")
+        if self.web_url:
+            for widget in (self.audio_button, self.source_widget, self.options_widget,
+                           self.output_widget, self.transcribe_button, self.complete_widget, self.ab_widget):
+                widget.hide()
+
+    def open_web_gui(self):
+        if self.web_url:
+            QDesktopServices.openUrl(QUrl(self.web_url))
+        elif not self.busy and not self.setup:
+            self.send({"action": "web_gui"}, "Opening the local web GUI…")
+
+    def return_to_desktop(self):
+        if not self.web_url:
+            return
+        process, self.worker = self.worker, None
+        if process and process.state() != QProcess.NotRunning:
+            if sys.platform == "win32":
+                QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
+            else:
+                process.kill()
+            if not process.waitForFinished(3000):
+                self.worker = process
+                self.fail("The web GUI is still stopping. Try Return to Desktop again.")
+                return
+        self.web_url = None
+        self.start()
 
     @staticmethod
     def clear_layout(layout):
@@ -584,6 +627,7 @@ class MainWindow(QMainWindow):
         if self.frozen:
             try:
                 shutil.copy2(self.resources / "src/worker.py", self.root / "src/worker.py")
+                shutil.copytree(self.resources / "upstream/muscriptor/web_dist", self.root / "upstream/muscriptor/web_dist", dirs_exist_ok=True)
             except OSError:
                 self.fail("The local engine could not be updated. Use Repair Dependencies.")
                 return
@@ -609,6 +653,7 @@ class MainWindow(QMainWindow):
     def engine_stopped(self, process):
         if self.worker is process and not self.closing:
             self.worker = None
+            self.web_url = None
             self.fail("The engine stopped. Click Try Again to restart it.")
         process.deleteLater()
 
@@ -635,7 +680,15 @@ class MainWindow(QMainWindow):
 
     def receive(self, event):
         kind = event["type"]
-        if kind == "backend":
+        if kind == "web_ready":
+            url = QUrl(event.get("url", ""))
+            if url.scheme() != "http" or url.host() != "127.0.0.1" or url.port() <= 0:
+                self.fail("The local web GUI returned an invalid address.")
+                return
+            self.web_url = url.toString()
+            self.busy = False
+            QDesktopServices.openUrl(url)
+        elif kind == "backend":
             self.backend = event["device"]
             self.hardware.setText(event.get("detail", ""))
             self.device.blockSignals(True)
@@ -835,7 +888,7 @@ class MainWindow(QMainWindow):
                 self.fail(message)
 
     def dragEnterEvent(self, event):
-        if not self.busy and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
+        if not self.busy and not self.web_url and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
             self.audio_button.setProperty("dragging", True)
             self.audio_button.style().unpolish(self.audio_button)
             self.audio_button.style().polish(self.audio_button)
@@ -849,7 +902,7 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event):
         self.dragLeaveEvent(event)
-        if not self.busy and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
+        if not self.busy and not self.web_url and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
             self.stage(Path(event.mimeData().urls()[0].toLocalFile()))
             event.acceptProposedAction()
 

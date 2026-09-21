@@ -77,6 +77,31 @@ class WindowsUITests(unittest.TestCase):
         for widget in (self.window.model, self.window.device, self.window.folder_button, self.window.audio_button):
             self.assertFalse(widget.isEnabled())
 
+    def test_web_gui_reuses_worker_locks_desktop_and_reopens_same_url(self):
+        with patch.object(self.window, 'send') as send:
+            self.window.open_web_gui()
+        self.assertEqual(send.call_args.args[0], {'action': 'web_gui'})
+        with patch('WindowsApp.QDesktopServices.openUrl') as open_url:
+            self.window.receive(dict(type='web_ready', url='http://127.0.0.1:8123'))
+            self.window.open_web_gui()
+            self.assertEqual(open_url.call_count, 2)
+            self.assertEqual(open_url.call_args.args[0].toString(), 'http://127.0.0.1:8123')
+        self.assertFalse(self.window.web_widget.isHidden())
+        self.assertFalse(self.window.model_segments.isEnabled())
+        self.assertFalse(self.window.device.isEnabled())
+        self.assertTrue(self.window.audio_button.isHidden())
+        self.assertTrue(self.window.web_button.isEnabled())
+        with patch.object(self.window, 'start') as start:
+            self.window.return_to_desktop()
+            start.assert_called_once()
+        self.assertIsNone(self.window.web_url)
+
+    def test_web_gui_rejects_remote_address(self):
+        with patch('WindowsApp.QDesktopServices.openUrl') as open_url:
+            self.window.receive(dict(type='web_ready', url='https://example.com'))
+        open_url.assert_not_called()
+        self.assertIsNone(self.window.web_url)
+
     def test_auth_error_allows_token_retry_and_model_switch(self):
         self.window.receive(dict(type='error', code='auth', message='Accept model terms'))
         self.assertFalse(self.window.authenticated)

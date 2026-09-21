@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Darwin
 
 final class AppState: ObservableObject {
     @Published var busy = true
@@ -27,6 +28,7 @@ final class AppState: ObservableObject {
     @Published var createAB = false
     @Published var soundfont: URL? = nil
     @Published var abResult: URL? = nil
+    @Published var webURL: URL? = nil
     var modelName: String { selectedModel.capitalized }
     private var worker: Process?
     private var input: FileHandle?
@@ -54,6 +56,10 @@ final class AppState: ObservableObject {
             do {
                 let bundledWorker = Bundle.main.resourceURL!.appendingPathComponent("engine/worker.py")
                 try Data(contentsOf: bundledWorker).write(to: root.appendingPathComponent("src/worker.py"), options: .atomic)
+                let bundledWeb = Bundle.main.resourceURL!.appendingPathComponent("engine/upstream/muscriptor/web_dist")
+                let installedWeb = root.appendingPathComponent("upstream/muscriptor/web_dist")
+                if FileManager.default.fileExists(atPath: installedWeb.path) { try FileManager.default.removeItem(at: installedWeb) }
+                try FileManager.default.copyItem(at: bundledWeb, to: installedWeb)
             } catch {
                 started = false; busy = false
                 self.error = "The local engine couldn’t be updated. Use Repair Dependencies in the app menu."
@@ -93,6 +99,7 @@ final class AppState: ObservableObject {
                     self.busy = false
                     self.started = false
                     self.worker = nil
+                    self.webURL = nil
                     if !self.repairing { self.error = "The transcription engine stopped. Click Try Again to restart it. Details are in the app’s logs." }
                 }
             }
@@ -133,6 +140,10 @@ final class AppState: ObservableObject {
 
     func receive(_ event: [String: Any]) {
         switch event["type"] as? String {
+        case "web_ready":
+            guard let address = event["url"] as? String, let url = URL(string: address), url.scheme == "http", url.host == "127.0.0.1", url.port != nil else { return }
+            webURL = url; busy = false; progress = nil; message = ""; endActivity()
+            NSWorkspace.shared.open(url)
         case "backend":
             backend = event["device"] as? String ?? "CPU"
             processorDetail = event["detail"] as? String ?? ""
@@ -299,7 +310,27 @@ final class AppState: ObservableObject {
     func stop() {
         input?.closeFile(); input = nil
         setupProcess?.terminate(); setupProcess = nil
-        worker?.terminate(); worker = nil; started = false; endActivity()
+        if let process = worker, process.isRunning {
+            if webURL != nil {
+                // Stop any active web inference before releasing its model.
+                // Include optional MuseScore/FluidSynth children of this worker.
+                if killpg(process.processIdentifier, SIGKILL) != 0 { kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+            } else { process.terminate() }
+        }
+        worker = nil; webURL = nil; started = false; endActivity()
+    }
+
+    func openWebGUI() {
+        if let url = webURL { NSWorkspace.shared.open(url); return }
+        guard !busy, !setup else { return }
+        busy = true; error = ""; message = "Opening the local web GUI…"; beginActivity()
+        send(["action": "web_gui"])
+    }
+
+    func returnToDesktop() {
+        guard webURL != nil else { return }
+        stop(); start()
     }
 
     func repair() {
@@ -400,7 +431,13 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("AUDIO → MIDI").font(.system(size: 25, weight: .semibold, design: .rounded))
+                HStack {
+                    Text("AUDIO → MIDI").font(.system(size: 25, weight: .semibold, design: .rounded))
+                    Spacer()
+                    Button("Open Web GUI") { state.openWebGUI() }
+                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
+                        .disabled(state.busy || state.setup)
+                }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Model").font(.headline)
@@ -412,12 +449,21 @@ struct ContentView: View {
                         Text("Small").tag("small")
                         Text("Medium").tag("medium")
                         Text("Large").tag("large")
-                    }.pickerStyle(.segmented).labelsHidden().disabled(state.busy)
+                    }.pickerStyle(.segmented).labelsHidden().disabled(state.busy || state.webURL != nil)
                     Text("Small uses less memory · Medium balances size and accuracy · Large favors accuracy")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                if state.busy {
+                if state.webURL != nil {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Web GUI running locally").font(.headline)
+                        Text("Using this app’s \(state.modelName) model and \(state.backend). Keep the app open while using your browser.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Text("Web downloads use your browser’s save location. Returning to desktop stops the web GUI and any active web transcription.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Return to Desktop") { state.returnToDesktop() }
+                    }.padding(14).background(Color.primary.opacity(0.035)).cornerRadius(12)
+                } else if state.busy {
                     VStack(spacing: 12) {
                         if !state.filename.isEmpty { Text(state.filename).font(.headline).lineLimit(2) }
                         Text(state.message).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -481,9 +527,9 @@ struct ContentView: View {
                     }
                 }
 
-                if !state.setup && state.result == nil { transcriptionOptions }
+                if !state.setup && state.result == nil && state.webURL == nil { transcriptionOptions }
 
-                if let abResult = state.abResult {
+                if let abResult = state.abResult, state.webURL == nil {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("A/B audio saved to").font(.headline)
                         pathLabel(abResult.path)
@@ -493,7 +539,7 @@ struct ContentView: View {
                     }
                 }
 
-                if let destination = state.destination {
+                if let destination = state.destination, state.webURL == nil {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(state.result == nil ? "MIDI destination" : "MIDI saved to").font(.headline)
@@ -536,7 +582,7 @@ struct ContentView: View {
             }.padding(28)
         }.frame(width: 560, height: 730)
         .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
-            guard !state.busy, let provider = providers.first else { return false }
+            guard !state.busy, state.webURL == nil, let provider = providers.first else { return false }
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 let url: URL?
                 if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }

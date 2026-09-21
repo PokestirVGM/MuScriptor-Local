@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install frontend build tool
+        run: npm install --global pnpm@10.20.0
       - name: Ensure installer compiler is available
         shell: pwsh
         run: |
@@ -66,6 +71,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Worker checks failed.' }
           & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_mac_options.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Shared transcription option checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_web_gui.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Local web GUI checks failed.' }
       - uses: actions/upload-artifact@v4
         with:
           name: MuScriptor-Local-Windows-x64-Preview

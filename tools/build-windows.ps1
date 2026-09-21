@@ -7,6 +7,8 @@ if (!(Test-Path 'upstream/muscriptor/transcription_model.py')) {
 $revision = (Get-Content upstream-revision.txt -Raw).Trim()
 git -C upstream checkout $revision
 if ($LASTEXITCODE -ne 0) { throw 'Could not select the pinned official source revision.' }
+python tools/build-web.py
+if ($LASTEXITCODE -ne 0) { throw 'Could not bundle the official web GUI.' }
 python -m pip install -r requirements-windows-ui.txt
 if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
