@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Windows AMD GPU support
+## 1.0 Beta 3 for Windows — 2026-09-21
 
 - Add experimental DirectML setup for AMD graphics, including the RX 6800 XT; existing installations use Repair Dependencies in an updated app build.
 - Run the decoder on the GPU while keeping complex audio conditioning on CPU, without modifying the official model or vendored source.

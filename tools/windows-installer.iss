@@ -1,8 +1,8 @@
 [Setup]
 AppId={{CA431D2A-667D-4B97-AEF5-FE2B0219C01B}
 AppName=MuScriptor Local
-AppVersion=1.0.0-beta.windows.2
-AppVerName=MuScriptor Local 1.0 Beta 2 for Windows
+AppVersion=1.0.0-beta.windows.3
+AppVerName=MuScriptor Local 1.0 Beta 3 for Windows
 AppPublisher=MuScriptor Local contributors
 AppPublisherURL=https://github.com/PokestirVGM/MuScriptor-Local
 DefaultDirName={localappdata}\Programs\MuScriptor Local

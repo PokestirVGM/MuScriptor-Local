@@ -1,5 +1,9 @@
 # Continuing development on Windows
 
+## Windows Beta 3 release
+
+The owner explicitly authorized building, pushing, and publishing Windows Beta 3 (`v1.0.0-beta.windows.3`) with experimental AMD DirectML support. No further confirmation is required for this release. RX 6800 XT hardware transcription remains untested; do not claim hardware validation. Existing users must choose **App → Repair Dependencies** after upgrading. Preserve all macOS releases. The older Beta 2 approval and build references below are historical.
+
 ## Shared source of truth
 
 Use **`main`** for both Windows and macOS. The old `codex/windows-preview` work is merged, including its physical-PC setup fixes. Current source also includes the newer compact interface, instrument picker, notation quantization, and A/B audio options. Published release installers remain snapshots of their release tags and may show the earlier interface until a new release is built.

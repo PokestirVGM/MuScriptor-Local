@@ -1,6 +1,6 @@
 # MuScriptor Local 1.0 Beta for Windows
 
-An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. Current source adds experimental AMD acceleration through DirectML; the published Beta 2 download has CPU/CUDA support only. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
+An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. Windows Beta 3 adds experimental AMD acceleration through DirectML. The RX 6800 XT has not been hardware-tested. Existing users must choose **App → Repair Dependencies** after upgrading. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
 
 For normal use, you do not install Python or Node or run terminal commands. The app manages setup in your user folder and caches the models you download. The installer bundles the app and engine source; first launch downloads the private runtime and selected models, so Internet access and your own Hugging Face model access are needed initially. Optional MuseScore/FluidSynth features have additional requirements.
 
@@ -26,7 +26,7 @@ Windows Beta 2 includes this web GUI and the current interface. The owner explic
 
 ### Installing the published beta
 
-1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.2).
+1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.3).
 2. Run the installer. It installs for your account and creates a Start Menu shortcut and uninstaller; administrator access is not required.
 3. Open MuScriptor Local and allow first-run engine setup to finish. Internet access is required for the private Python runtime and CPU or CUDA dependencies.
 4. Choose a model. Accept that size's Hugging Face terms yourself, then connect your own read token in the app. Each size requires separate acceptance and download.

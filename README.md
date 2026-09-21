@@ -4,7 +4,7 @@ An easy way to run official [MuScriptor](https://github.com/muscriptor/muscripto
 
 This is an independent community launcher for MuScriptor by Kyutai and Mirelo. Audio processing stays on your computer.
 
-**[Download Windows 1.0 Beta 2](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.2)** · **[Download macOS 1.0 Beta 3](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
+**[Download Windows 1.0 Beta 2](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.3)** · **[Download macOS 1.0 Beta 3](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
 ## Platform status
 
