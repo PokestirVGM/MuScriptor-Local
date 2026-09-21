@@ -28,8 +28,8 @@ Source: "..\build\windows\dist\MuScriptor Local\*"; DestDir: "{app}"; Flags: ign
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Icons]
-Name: "{group}\MuScriptor Local"; Filename: "{app}\MuScriptor Local.exe"
-Name: "{autodesktop}\MuScriptor Local"; Filename: "{app}\MuScriptor Local.exe"; Tasks: desktopicon
+Name: "{group}\MuScriptor Local"; Filename: "{app}\MuScriptor Local.exe"; AppUserModelID: "MuScriptor.Local.Desktop"
+Name: "{autodesktop}\MuScriptor Local"; Filename: "{app}\MuScriptor Local.exe"; AppUserModelID: "MuScriptor.Local.Desktop"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\MuScriptor Local.exe"; Description: "Open MuScriptor Local"; Flags: nowait postinstall skipifsilent

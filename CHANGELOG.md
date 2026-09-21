@@ -9,6 +9,7 @@
 - Keep waveform padding/collation on CPU and rebuild the DirectML attention cache without nested slice writes, preventing corrupted conditioning and empty MIDI output.
 - Draw readable circle-plus instrument buttons independently of Windows font glyphs.
 - Use the official upstream MuScriptor mark for Windows executable/setup/window icons and the next macOS app bundle. Existing macOS releases remain unchanged.
+- Set the Windows taskbar application identity and matching installer shortcuts so the running app uses the MuScriptor icon instead of Python's default icon.
 - AMD support remains experimental; the corrected build needs retesting on the RX 6800 XT.
 
 ## 1.0 Beta 3 for Windows — 2026-09-21

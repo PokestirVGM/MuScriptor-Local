@@ -15,6 +15,21 @@ from PySide6.QtWidgets import (
     QStyleOptionButton, QVBoxLayout, QWidget,
 )
 
+WINDOWS_APP_ID = "MuScriptor.Local.Desktop"
+
+
+def configure_windows_identity():
+    if sys.platform == "win32":
+        import ctypes
+        # Set this before Qt creates any windows so the taskbar does not group
+        # the packaged launcher under Python's default application identity.
+        set_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_id.argtypes = [ctypes.c_wchar_p]
+        set_id.restype = ctypes.c_long
+        result = set_id(WINDOWS_APP_ID)
+        if result < 0:
+            raise OSError(f"Windows application identity failed: {result:#x}")
+
 
 def support_directory():
     if sys.platform == "win32":
@@ -157,7 +172,9 @@ class MainWindow(QMainWindow):
         self.resources = Path(sys._MEIPASS) / "resources" if self.frozen else self.root
         icon = self.resources / "assets/muscriptor.ico"
         if icon.is_file():
-            self.setWindowIcon(QIcon(str(icon)))
+            app_icon = QIcon(str(icon))
+            QApplication.instance().setWindowIcon(app_icon)
+            self.setWindowIcon(app_icon)
         self.python = self.root / (".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python")
         self.worker = None
         self.installer = None
@@ -951,6 +968,7 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    configure_windows_identity()
     app = QApplication(sys.argv)
     window = MainWindow(autostart="--smoke-test" not in sys.argv)
     window.show()
