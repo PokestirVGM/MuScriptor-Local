@@ -5,7 +5,7 @@ Validated on 2026-09-20 (local time). This is a candidate for owner testing, not
 ## Build and interface
 
 - Installer version: `1.0.0-beta.windows.2`, with the existing installer AppId for upgrades.
-- Candidate packages were built from `ebb2e37538060a0bd779577fdcd541153afdd2ba`. [Windows build 35551975397](https://github.com/PokestirVGM/MuScriptor-Local/actions/runs/35551975397) passed the build, normal and 150% UI checks, packaged startup, installer smoke test, fresh CPU setup, and worker/option/web tests. Subsequent validation-document updates do not change the packaged app sources.
+- Candidate packages were built from commit `3c93e39`. [Windows build 35552378063](https://github.com/PokestirVGM/MuScriptor-Local/actions/runs/35552378063) passed the build, normal and 150% UI checks, packaged startup, installer smoke test, fresh CPU setup, and worker/option/web tests. Subsequent validation-document updates do not change the packaged app sources or bundled README.
 - The desktop heading is **MuScriptor Local**. The compact interface, instrument picker, notation option, A/B option, and bundled official web GUI are included.
 - Local checks: 24 worker tests, 12 transcription-option tests, 3 web tests, and 19 Windows interface tests. All 19 interface tests also passed at 150% scaling with generated light/dark previews.
 - Fixed worker cleanup when a restricted Windows account denies `taskkill`: the app also uses its own process handle. A real-child regression test covers Return to Desktop and Quit.
@@ -27,7 +27,9 @@ Validated on 2026-09-20 (local time). This is a candidate for owner testing, not
 - Custom output folder with spaces and Unicode passed. Existing MIDI was preserved and a distinct collision-safe filename was written.
 - The fresh CUDA engine passed acoustic-piano conditioning: the output MIDI contained program 0 only.
 - Enabling notation fetched the 77.3 MB tempo helper. The generated melody yielded no usable beat subdivision; the app correctly warned and retained performance timing.
+- A second generated 32-second steady-beat sample successfully produced quantized MIDI on CUDA: all seven chunks completed, `quantized=true`, and no warnings.
 - Requesting A/B without FluidSynth preserved the completed MIDI and reported the missing optional dependency.
+- A separate successful render used temporary FluidSynth 2.6.1 and a checksum-verified MuseScore General SF2. It produced 44.1 kHz stereo audio with two non-silent, distinct channels (original left, synthesis right). Neither dependency was bundled or added to the system PATH.
 
 ## Official local web GUI
 
@@ -41,7 +43,7 @@ Validated on 2026-09-20 (local time). This is a candidate for owner testing, not
 - Package audit checks every entry for credentials, private home paths, local logs, weights, and personal audio/MIDI. The only audio allowlist is the official web GUI's two public example MP3s, each required to match the pinned upstream file byte for byte. The candidate app's packaged startup test passed locally.
 
 - Install/upgrade and launch the candidate normally, check Windows scaling and Explorer actions, transcribe a chosen file, open the web GUI, save a browser MIDI export, and return to the desktop.
-- Successful FluidSynth/SoundFont A/B rendering and successful notation quantization on a suitable musical recording were not independently completed on this PC. Their fallback behavior was tested.
+- Both notation and A/B success/fallback paths were exercised with generated test audio. Accuracy on the owner's recordings and other material remains part of musical evaluation.
 - Small/Medium require the user's separate model terms and were not downloaded or transcribed in this session. Other GPUs, Windows 10, and a complete uninstall/preservation cycle remain unvalidated.
 - The executable and installer are unsigned. First setup and new model downloads require Internet access. Current Hugging Face downloads may restart an interrupted file.
 - Do not publish a Windows release until the owner has tried this candidate and explicitly approved publication. Use a new Windows tag; preserve all existing releases, including macOS Beta 3.
