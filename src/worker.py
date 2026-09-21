@@ -267,8 +267,70 @@ def mps_error(exc):
 def device_error(exc, device):
     if device == "mps":
         return mps_error(exc)
+    if device.startswith("privateuseone:"):
+        return isinstance(exc, (RuntimeError, NotImplementedError)) and any(
+            word in str(exc).lower() for word in (
+                "directml", "privateuseone", "privateuse1", "dml", "out of memory",
+                "not enough memory", "gpu video memory", "unsupported data type",
+                "80070057", "8007000e", "device removed"))
     return device.startswith("cuda") and isinstance(exc, (RuntimeError, NotImplementedError)) and any(
         word in str(exc).lower() for word in ("cuda", "cublas", "cudnn", "no kernel image", "out of memory"))
+
+
+def directml_devices():
+    """DirectML is optional and Windows-only; a broken driver must not block CPU."""
+    if platform.system() != "Windows":
+        return []
+    try:
+        import torch_directml
+    except ImportError:
+        return []
+    except (OSError, RuntimeError):
+        logging.exception("DirectML could not initialize")
+        emit("warning", message="DirectML could not start. Update your AMD graphics driver and use Repair Dependencies. CPU is still available.")
+        return []
+    import torch
+    devices = []
+    try:
+        for index in range(torch_directml.device_count()):
+            try:
+                device = torch_directml.device(index)
+                # Force a small operation and readback, not just adapter enumeration.
+                probe = torch.ones((2, 2), device=device)
+                if not torch.equal((probe @ probe).cpu(), torch.full((2, 2), 2.0)):
+                    raise RuntimeError("DirectML calculation check failed")
+                name = torch_directml.device_name(index)
+                devices.append(dict(id=str(device), name=name, backend="DirectML (experimental)",
+                                    memory_bytes=None, memory_kind="GPU memory",
+                                    discrete=bool(re.search(r"\b(RX|Arc|GeForce|Quadro)\b|Radeon Pro", name, re.I)),
+                                    default=index == torch_directml.default_device()))
+            except (RuntimeError, OSError):
+                logging.exception("DirectML adapter %d is unavailable", index)
+        if not devices:
+            emit("warning", message="No working DirectML GPU was found. Update your graphics driver. CPU is still available.")
+    except (RuntimeError, OSError):
+        logging.exception("DirectML GPU discovery failed")
+    return devices
+
+
+def move_transcription_to_directml(model, device):
+    """Keep official CPU conditioning (complex STFT) and accelerate the decoder.
+
+    Safetensors is loaded on CPU first. Upstream's conditioners retain their CPU
+    device attributes; only their small completed outputs cross to DirectML.
+    No global torch patches or changes to the vendored engine are needed.
+    """
+    for name, module in model._model.named_children():
+        if name != "condition_provider":
+            module.to(device)
+
+    def transfer_conditions(module, args, output):
+        return {key: (condition.to(device), mask.to(device))
+                for key, (condition, mask) in output.items()}
+
+    model._model.condition_provider.register_forward_hook(transfer_conditions)
+    model._device = device
+    return model
 
 
 def system_memory():
@@ -310,6 +372,7 @@ def device_inventory():
                                 memory_bytes=properties.total_memory, memory_kind="dedicated GPU memory"))
     if torch.backends.mps.is_available():
         devices.append(dict(id="mps", name=cpu, backend="Apple MPS", memory_bytes=memory, memory_kind="shared unified memory"))
+    devices.extend(directml_devices())
     devices.append(dict(id="cpu", name=cpu, backend="CPU", memory_bytes=memory, memory_kind="system memory"))
     return devices
 
@@ -319,6 +382,9 @@ def choose_device(devices, requested="auto"):
         gpus = [device for device in devices if device["id"].startswith("cuda:")]
         if gpus:
             return max(gpus, key=lambda device: device["memory_bytes"] or 0)["id"]
+        directml = [device for device in devices if device["id"].startswith("privateuseone:")]
+        if directml:
+            return max(directml, key=lambda device: (device.get("discrete", False), device.get("default", False)))["id"]
         return "mps" if any(device["id"] == "mps" for device in devices) else "cpu"
     if not any(device["id"] == requested for device in devices):
         raise UserError("That processor is not available. Choose Automatic or CPU.", "device")
@@ -346,7 +412,7 @@ class Engine:
         model_repo(model)
         self.model_size = model
         self.device_event()
-        logging.info("Startup: torch=%s MPS=%s MuScriptor=%s", torch.__version__, self.device, model)
+        logging.info("Startup: torch=%s device=%s MuScriptor=%s", torch.__version__, self.device, model)
 
     def ready(self):
         from huggingface_hub import get_token
@@ -399,10 +465,14 @@ class Engine:
         self.model = None
         gc.collect()
         previous = self.device
-        self.clear_device_cache()
+        backend = next((item["backend"] for item in self.devices if item["id"] == previous), "GPU")
+        try:
+            self.clear_device_cache()
+        except RuntimeError:
+            logging.exception("GPU cache cleanup failed during CPU recovery")
         self.device = "cpu"
         self.device_event()
-        emit("warning", message=f"{'Apple MPS' if previous == 'mps' else 'NVIDIA CUDA'} could not complete this operation. Retrying locally on CPU; this will be slower.")
+        emit("warning", message=f"{backend} could not complete this operation. Retrying locally on CPU; this will be slower. Try a smaller model to reduce GPU memory use.")
 
     def load(self):
         if self.model is not None:
@@ -410,11 +480,18 @@ class Engine:
         from muscriptor import TranscriptionModel
         path = get_weights(self.model_size)
         emit("status", message=f"Loading MuScriptor {self.model_size.title()}…")
-        self.model = TranscriptionModel.load_model(path, device=self.device)
-        actual = next(self.model._model.parameters()).device
+        if self.device.startswith("privateuseone:"):
+            import torch
+            self.model = TranscriptionModel.load_model(path, device="cpu")
+            move_transcription_to_directml(self.model, torch.device(self.device))
+            # Conditioning intentionally stays on CPU; verify decoder placement.
+            actual = self.model._model.emb.weight.device
+        else:
+            self.model = TranscriptionModel.load_model(path, device=self.device)
+            actual = next(self.model._model.parameters()).device
         logging.info("Loaded official %s: parameter device=%s", self.model_size, actual)
-        if actual.type != self.device.split(":")[0] or (self.device.startswith("cuda:") and actual.index != int(self.device.split(":")[1])):
-            raise RuntimeError("Model did not load on the selected device")
+        if actual.type != self.device.split(":")[0] or (":" in self.device and actual.index != int(self.device.split(":")[1])):
+            raise RuntimeError(f"Model did not load on the selected device ({self.device})")
         self.device_event()
 
     def prepare(self):
@@ -423,7 +500,7 @@ class Engine:
         except Exception as exc:
             if not device_error(exc, self.device):
                 raise
-            logging.exception("MPS load failed")
+            logging.exception("GPU model load failed")
             self.fallback()
             self.load()
         self.ready()
@@ -469,7 +546,7 @@ class Engine:
                 except Exception as exc:
                     if not device_error(exc, self.device):
                         raise
-                    logging.exception("MPS transcription failed; restarting complete song on CPU")
+                    logging.exception("GPU transcription failed; restarting complete song on CPU")
                     events = []
                     self.fallback()
             emit("status", message="Writing MIDI…")
@@ -594,7 +671,7 @@ def main():
     def warning(message, *args, **kwargs):
         original_warning(message, *args, **kwargs)
         if "fall back" in str(message).lower() and "cpu" in str(message).lower():
-            emit("warning", message="One Apple MPS operation is running on CPU; transcription is continuing locally.")
+            emit("warning", message="One GPU operation is running on CPU; transcription is continuing locally.")
     warnings.showwarning = warning
     try:
         import argparse

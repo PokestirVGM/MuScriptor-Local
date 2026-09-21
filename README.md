@@ -14,6 +14,8 @@ This is an independent community launcher for MuScriptor by Kyutai and Mirelo. A
 | Windows 10/11 x64 | [1.0 Beta 2 — installation and limitations](WINDOWS.md) |
 | Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
+Current source adds **experimental AMD GPU acceleration on Windows through DirectML**, including a setup path for Radeon RX 6800 XT. It is not included in the linked Windows Beta 2 download. Build the updated Windows app, then use **App → Repair Dependencies** on an existing installation. See [AMD setup and validation limits](WINDOWS.md#amd-gpus-directml-experimental).
+
 ## One app handles setup
 
 The app bundles its native interface, official engine source, prebuilt official web GUI, and license notices. It installs and manages its own Python environment and dependencies in your user folder. You do not need to install Python or Node, run terminal commands, or set up a web server to use the app.

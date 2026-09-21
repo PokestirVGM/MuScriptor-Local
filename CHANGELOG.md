@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Windows AMD GPU support
+
+- Add experimental DirectML setup for AMD graphics, including the RX 6800 XT; existing installations use Repair Dependencies in an updated app build.
+- Run the decoder on the GPU while keeping complex audio conditioning on CPU, without modifying the official model or vendored source.
+- List DirectML adapters in the processor picker, prefer recognizable discrete adapters, and report GPU failures before retrying desktop transcription on CPU.
+- Add adapter and UI regression checks, Windows dependency-install checks, and an opt-in hardware validation script. Physical AMD GPU transcription and speed are not yet validated.
+
 ## 1.0 Beta 3 for macOS — 2026-09-20
 
 - Add one-click access to the bundled official web GUI using the desktop's local installation, selected model, and processor; Return to Desktop stops the web session.

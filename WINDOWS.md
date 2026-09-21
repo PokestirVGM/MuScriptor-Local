@@ -1,6 +1,6 @@
 # MuScriptor Local 1.0 Beta for Windows
 
-An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, CPU/CUDA dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM and AMD/Intel GPU acceleration are not included. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
+An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. Current source adds experimental AMD acceleration through DirectML; the published Beta 2 download has CPU/CUDA support only. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
 
 For normal use, you do not install Python or Node or run terminal commands. The app manages setup in your user folder and caches the models you download. The installer bundles the app and engine source; first launch downloads the private runtime and selected models, so Internet access and your own Hugging Face model access are needed initially. Optional MuseScore/FluidSynth features have additional requirements.
 
@@ -38,11 +38,40 @@ CUDA setup downloads roughly 3 GiB of PyTorch packages plus other dependencies. 
 
 ## Processor selection
 
-**Automatic** chooses the available NVIDIA GPU with the most memory, otherwise CPU. A specific NVIDIA GPU or CPU can also be selected. The window reports processor names and total memory capacity, not free memory or a guarantee that every model and recording will fit.
+**Automatic** chooses the available NVIDIA GPU with the most memory, then an available DirectML GPU, otherwise CPU. With DirectML, recognizable discrete Radeon RX/Pro adapters are preferred over integrated graphics, then DirectML's default adapter. A specific detected GPU or CPU can also be selected. The window reports processor names; CUDA reports total memory capacity, not free memory or a guarantee that every model and recording will fit. DirectML does not report memory capacity.
 
-The worker checks the loaded model's actual device. Recognized GPU failures retry the complete transcription on CPU with a warning. An unavailable saved GPU returns to Automatic. AMD/Intel graphics use CPU.
+The worker checks the loaded decoder's actual device. Recognized GPU failures in desktop transcription retry the complete transcription on CPU with a warning. An unavailable saved GPU returns to Automatic. The local web GUI uses the same loaded model and adapter; if inference fails there, return to the desktop and choose CPU to retry.
 
-The private engine uses Python 3.12.14 and matching PyTorch/torchaudio 2.7.1 CUDA 12.8 or CPU packages. No system Python or driver is changed. A compatible NVIDIA driver is required. See [validation results](https://github.com/PokestirVGM/MuScriptor-Local/blob/v1.0.0-beta.windows.2/validation/WINDOWS_BETA_2.md) for tested hardware and limitations.
+The private engine uses Python 3.12.14 and matching PyTorch/torchaudio 2.7.1 CUDA 12.8 or CPU packages. DirectML instead pins PyTorch/torchaudio 2.4.1, torchvision 0.19.1, and torch-directml 0.2.5.dev240914 to match Microsoft's published package dependencies. No system Python or driver is changed. A compatible graphics driver is required. See [validation results](https://github.com/PokestirVGM/MuScriptor-Local/blob/v1.0.0-beta.windows.2/validation/WINDOWS_BETA_2.md) for previously tested hardware and limitations.
+
+## AMD GPUs: DirectML (experimental)
+
+This feature is in current source, **not the published Windows Beta 2 installer**. It targets DirectX 12 AMD GPUs such as the Radeon RX 6800 XT on Windows 10/11 x64. It uses Microsoft's [PyTorch DirectML backend](https://learn.microsoft.com/en-us/windows/ai/directml/pytorch-windows). The RX 6800 XT is not listed in AMD's [native Windows ROCm 7.2.1 support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/docs-7.2.1/docs/compatibility/compatibilityrad/windows/windows_compatibility.html), so installing ROCm is not the setup path for this card.
+
+1. Update the Radeon graphics driver and install a Windows build made from the updated source.
+2. For an existing installation, choose **App → Repair Dependencies**. First-time setup selects DirectML automatically when AMD graphics are detected and NVIDIA's setup tool is absent. Cached models are retained.
+3. Start with **Small** and a short recording. Expand processor settings and confirm **DirectML (experimental) — AMD Radeon RX 6800 XT**, or select that adapter explicitly if the machine also has integrated graphics.
+4. Transcribe and check that the footer still says DirectML when it finishes. A warning and CPU footer mean the desktop retried on CPU, not that the GPU run succeeded.
+
+The transformer decoder runs on the GPU in float32. Audio conditioning, including the complex-valued spectrogram, stays on CPU, and its completed outputs transfer to the GPU. This avoids unsupported complex DirectML operations and keeps the official model and weights unchanged. CPU activity during transcription is expected. Some other operations may fall back individually to CPU, limiting speed. The existing Large default is unchanged; use Small first to reduce memory pressure.
+
+**Validation limit:** adapter, selection, UI, and CPU recovery checks can run without an AMD GPU. Complete transcription and speed on a physical RX 6800 XT have not yet been verified. Treat this as experimental until a representative recording finishes on that card. No speedup is promised. The Windows workflow also checks installation and runs the adapter/worker tests with the pinned DirectML dependencies; these are not hardware benchmarks.
+
+For development or if automatic hardware detection fails, close the app and run this from the updated source checkout in PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\bootstrap-windows.ps1 -Root "$env:LOCALAPPDATA/MuScriptor Local/Engine" -Resources "$PWD" -Compute directml
+```
+
+Reopen the updated app afterward. The processor picker can switch to CPU without reinstalling. Developers can use `-Compute cpu` or `-Compute cuda` to replace the engine packages; automatic repair redetects the hardware. On a machine with both NVIDIA and AMD adapters, automatic setup prefers CUDA, so explicitly request DirectML to try the Radeon.
+
+After caching a model in the app, a hardware check from the source checkout can verify a complete GPU run and produce a MIDI in the chosen output folder:
+
+```powershell
+& "$env:LOCALAPPDATA/MuScriptor Local/Engine/.venv/Scripts/python.exe" .\validation\validate_directml.py "C:/Audio/short-test.wav" --model small --output "C:/Audio/GPU-check"
+```
+
+The check fails if no DirectML adapter is usable, the selected model is not cached, or desktop inference falls back to CPU. Record the GPU, driver, model, audio length, wall time, and warnings before comparing with CPU using the same settings.
 
 ## Storage and offline operation
 

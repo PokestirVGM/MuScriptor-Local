@@ -704,8 +704,8 @@ class MainWindow(QMainWindow):
             self.device.setCurrentIndex(max(0, self.device.findData(requested)))
             self.settings.setValue("device", requested)
             self.device.blockSignals(False)
-            if sys.platform == "win32" and not any(d["id"].startswith("cuda") for d in event.get("devices", [])):
-                self.hardware.setText(self.hardware.text() + "\nNo CUDA GPU is available to PyTorch. This preview uses CPU for AMD/Intel graphics.")
+            if sys.platform == "win32" and not any(d["id"].startswith(("cuda:", "privateuseone:")) for d in event.get("devices", [])):
+                self.hardware.setText(self.hardware.text() + "\nNo supported GPU is available to the engine. For AMD graphics, update the driver and choose App → Repair Dependencies to install DirectML support.")
         elif kind == "ready":
             self.instrument_groups = event.get("instruments", self.instrument_groups)
             self.update_instruments()

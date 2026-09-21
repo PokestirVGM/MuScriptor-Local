@@ -73,6 +73,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Shared transcription option checks failed.' }
           & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_web_gui.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Local web GUI checks failed.' }
+      - name: Check DirectML installation and adapter without a physical GPU
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/bootstrap-windows.ps1 -Root "$env:RUNNER_TEMP/MuScriptor Engine" -Resources "$PWD" -Compute directml
+          if ($LASTEXITCODE -ne 0) { throw 'DirectML setup failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_directml.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'DirectML adapter checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_wrapper.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Worker checks with DirectML dependencies failed.' }
       - uses: actions/upload-artifact@v4
         with:
           name: MuScriptor-Local-Windows-x64-Preview

@@ -88,7 +88,16 @@ class WindowsUITests(unittest.TestCase):
         self.assertIn('CPU', self.window.footer.text())
         self.assertNotIn('NVIDIA', self.window.footer.text())
         self.assertEqual(self.window.hardware.text().splitlines()[0], 'Test Processor')
-        self.assertIn('No CUDA GPU is available', self.window.hardware.text())
+        self.assertIn('No supported GPU is available', self.window.hardware.text())
+
+    def test_directml_gpu_is_selectable_and_not_reported_as_cpu_only(self):
+        with patch('WindowsApp.sys.platform', 'win32'):
+            self.window.receive(dict(type='backend', device='DirectML (experimental)', device_id='privateuseone:0', requested_device='auto', detail='AMD Radeon RX 6800 XT', devices=[dict(id='privateuseone:0', backend='DirectML (experimental)', name='AMD Radeon RX 6800 XT'), dict(id='cpu', backend='CPU', name='Ryzen')]))
+        self.assertIn('DirectML', self.window.footer.text())
+        self.assertEqual(self.window.hardware.text(), 'AMD Radeon RX 6800 XT')
+        with patch.object(self.window, 'send') as send:
+            self.window.device.setCurrentIndex(self.window.device.findData('privateuseone:0'))
+            self.assertEqual(send.call_args.args[0], dict(action='select_device', device='privateuseone:0'))
 
     def test_busy_locks_model_device_and_destination(self):
         self.window.busy = True
