@@ -19,7 +19,7 @@ cp licenses/MuScriptor-MIT.txt "$APP/Contents/Resources/Legal/licenses/"
 import plistlib, shutil, sys
 from pathlib import Path
 app, root = sys.argv[1:]
-info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='4', CFBundleGetInfoString='1.0 Beta 3', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='MuScriptor Local contributors. Engine: Kyutai x Mirelo. Code: MIT. Model weights: separate license.')
+info = dict(CFBundleExecutable='MuScriptor Local', CFBundleIdentifier='local.muscriptor.desktop', CFBundleName='MuScriptor Local', CFBundleDisplayName='MuScriptor Local', CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='5', CFBundleGetInfoString='1.0 Beta 4', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True, MuScriptorRoot=root, NSHumanReadableCopyright='MuScriptor Local contributors. Engine: Kyutai x Mirelo. Code: MIT. Model weights: separate license.')
 info['CFBundleIconFile'] = 'MuScriptor.icns'
 for cache in Path(app, 'Contents/Resources/engine').rglob('__pycache__'):
     shutil.rmtree(cache)

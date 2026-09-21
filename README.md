@@ -4,17 +4,17 @@ An easy way to run official [MuScriptor](https://github.com/muscriptor/muscripto
 
 This is an independent community launcher for MuScriptor by Kyutai and Mirelo. Audio processing stays on your computer.
 
-**[Download Windows 1.0 Beta 2](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.3)** · **[Download macOS 1.0 Beta 3](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
+**[Download Windows 1.0 Beta 4](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.4)** · **[Download macOS 1.0 Beta 4](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.mac.4)** · [Report an issue](https://github.com/PokestirVGM/MuScriptor-Local/issues) · [Changelog](CHANGELOG.md)
 
 ## Platform status
 
 | Platform | Status |
 | --- | --- |
-| macOS 14+ on Apple Silicon | Beta 3, including the local web GUI |
-| Windows 10/11 x64 | [1.0 Beta 2 — installation and limitations](WINDOWS.md) |
+| macOS 14+ on Apple Silicon | Beta 4, including the app icon and local web GUI |
+| Windows 10/11 x64 | [1.0 Beta 4 — installation and limitations](WINDOWS.md) |
 | Intel Mac, Windows ARM, Linux desktop | No packaged release |
 
-Current source adds **experimental AMD GPU acceleration on Windows through DirectML**, including a setup path for Radeon RX 6800 XT. It is not included in the linked Windows Beta 2 download. Build the updated Windows app, then use **App → Repair Dependencies** on an existing installation. See [AMD setup and validation limits](WINDOWS.md#amd-gpus-directml-experimental).
+Windows Beta 4 includes **experimental AMD GPU acceleration through DirectML**, including a setup path for Radeon RX 6800 XT. After upgrading an existing Windows installation, use **App → Repair Dependencies**. See [AMD setup and validation limits](WINDOWS.md#amd-gpus-directml-experimental).
 
 ## One app handles setup
 
@@ -26,7 +26,7 @@ Optional score engraving and audio synthesis have additional upstream requiremen
 
 ## Install on macOS
 
-1. Download **MuScriptor-Local-1.0-Beta-3-macOS-Apple-Silicon.zip** from the [macOS Beta 3 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3).
+1. Download **MuScriptor-Local-1.0-Beta-4-macOS-Apple-Silicon.zip** from the [macOS Beta 4 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.mac.4).
 2. Unzip it, move **MuScriptor Local.app** into Applications, and open it.
 3. Let the app install its private Python environment. First setup requires Internet access.
 4. Choose **Small**, **Medium**, or **Large**. Open the selected model’s terms link and accept its conditions with your Hugging Face account.

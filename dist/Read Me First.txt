@@ -1,4 +1,4 @@
-MuScriptor Local 1.0 Beta 3 — Apple Silicon (build 4)
+MuScriptor Local 1.0 Beta 4 — Apple Silicon (build 5)
 
 An easy local app for official MuScriptor by Kyutai and Mirelo. It handles
 private Python setup, model downloads, and launching the official web GUI.

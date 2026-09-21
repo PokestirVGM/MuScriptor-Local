@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0 Beta 4 for macOS — 2026-09-21
+
+- Add the upstream MuScriptor waveform-and-note app icon to the Mac bundle.
+- Include the latest shared worker while keeping DirectML-specific changes confined to Windows GPU execution; macOS continues to use Apple MPS or CPU.
+- Retain native transcription, instrument options, and the bundled local web GUI from Beta 3.
+- Publish as a separate Apple Silicon macOS prerelease; existing Windows releases are unchanged.
+
 ## 1.0 Beta 4 for Windows — 2026-09-21
 
 - **New feature: experimental AMD GPU support through DirectML**, introduced in Windows Beta 3 and corrected in Beta 4 for desktop and local web transcription. Select your Radeon GPU in the processor picker. The owner reports successful testing after the RX 6800 XT failure; CPU remains available.
