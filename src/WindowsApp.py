@@ -1,18 +1,20 @@
 """Windows desktop preview. The engine runs separately; audio never leaves the PC."""
 from __future__ import annotations
 
+import uuid
 import json
 import os
 from pathlib import Path
 import shutil
 import sys
+from engine_install import install as install_engine
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QLayout, QMainWindow, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
-    QStyleOptionButton, QVBoxLayout, QWidget,
+    QLayout, QMainWindow, QMenu, QToolButton, QDialog, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
+    QStyleOptionButton, QVBoxLayout, QWidget, QPlainTextEdit,
 )
 
 WINDOWS_APP_ID = "MuScriptor.Local.Desktop"
@@ -37,6 +39,23 @@ def support_directory():
     return Path.home() / "Library/Application Support/MuScriptor Local"
 
 
+def settings_icon(color):
+    pixmap = QPixmap(48, 48)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap))
+    painter.translate(12, 12)
+    painter.drawEllipse(QRectF(-6.5, -6.5, 13, 13))
+    painter.drawEllipse(QRectF(-2.3, -2.3, 4.6, 4.6))
+    for _ in range(8):
+        painter.drawLine(0, -7, 0, -9)
+        painter.rotate(45)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def instrument_add_icon(color):
     # Draw the circle-plus explicitly: Segoe UI's mathematical glyph can be
     # tiny or use an inconsistent fallback font on Windows.
@@ -51,6 +70,54 @@ def instrument_add_icon(color):
     painter.drawLine(5, 8, 11, 8)
     painter.end()
     return QIcon(pixmap)
+
+
+class InstrumentResizeHandle(QWidget):
+    """Small drag/keyboard grip for the instrument choices, in logical pixels."""
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+        self.drag_start = None
+        self.setFixedHeight(12)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("Resize instrument list")
+        self.setToolTip("Drag to resize the instrument list. Arrow keys also resize.")
+
+    def resize_list(self, height):
+        self.target.setFixedHeight(max(80, min(320, round(height))))
+        self.setAccessibleDescription(f"Instrument list height: {self.target.height()} pixels")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start = (event.globalPosition().y(), self.target.height())
+            self.setFocus()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is not None:
+            y, height = self.drag_start
+            self.resize_list(height + event.globalPosition().y() - y)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start = None
+            event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            self.resize_list(self.target.height() + (20 if event.key() == Qt.Key_Down else -20))
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.palette().color(QPalette.Highlight if self.hasFocus() else QPalette.Mid))
+        painter.drawRoundedRect(QRectF((self.width()-32)/2, 4, 32, 3), 1.5, 1.5)
 
 
 def label(text=""):
@@ -180,6 +247,10 @@ class MainWindow(QMainWindow):
         self.installer = None
         self.buffer = b""
         self.busy = True
+        self.transcription_id = None
+        self.finish_ready = False
+        self.finishing = False
+        self.completed_seconds = 0
         self.setup = False
         self.authenticated = False
         self.source = None
@@ -191,9 +262,15 @@ class MainWindow(QMainWindow):
         self.selected_instruments = []
         self.soundfont = None
         self.ab_result = None
+        self.has_session = False
+        self.recovery_path = None
+        self.restore_after_restart = None
+        self.restore_latest_after_restart = False
+        self.pending_timing = None
+        self.saved_timing = ""
         self.web_url = None
         self.backend = "Detecting processor…"
-        self.setWindowTitle("MuScriptor Local")
+        self.setWindowTitle("MuScriptor Local — 1.0 Release Candidate")
         self.resize(560, 760)
         self.setMinimumSize(520, 600)
         self.setAcceptDrops(True)
@@ -212,13 +289,36 @@ class MainWindow(QMainWindow):
         self.layout.setContentsMargins(22, 28, 22, 22)
         self.layout.setSpacing(20)
         self.layout.setSizeConstraint(QLayout.SetNoConstraint)
-        title_row = QHBoxLayout()
-        title_row.addWidget(styled_label("MuScriptor Local", "title"), 1)
-        self.web_button = QPushButton("Open Web GUI")
+        title_row = QHBoxLayout(); title_row.setSpacing(12)
+        self.header_logo = QLabel()
+        self.header_logo.setFixedSize(76, 48)
+        self.header_logo.setAccessibleName("MuScriptor logo")
+        self.update_header_logo()
+        title_row.addWidget(self.header_logo)
+        brand = QVBoxLayout(); brand.setSpacing(3)
+        brand.addWidget(styled_label("MuScriptor", "title"))
+        brand.addWidget(styled_label("Independent adaptation by Pokestir", "caption"))
+        title_row.addLayout(brand, 1)
+        self.web_button = QPushButton("Open Web GUI ↗")
         self.web_button.setObjectName("link")
         self.web_button.clicked.connect(self.open_web_gui)
         title_row.addWidget(self.web_button)
+        self.options_menu = QMenu(self)
+        self.open_session_action = self.options_menu.addAction("Open Session…", lambda: self.open_session())
+        self.recover_action = self.options_menu.addAction("Recover Last Session", lambda: self.open_session(self.recovery_path))
+        self.options_menu.addSeparator()
+        self.options_button = QToolButton()
+        self.options_button.setObjectName("optionsGear")
+        self.options_button.setIcon(settings_icon(QColor("#dedfe0" if self.palette().window().color().lightness() < 128 else "#25262a")))
+        self.options_button.setIconSize(QSize(24, 24))
+        self.options_button.setFixedSize(30, 30)
+        self.options_button.setAccessibleName("Sessions and app options")
+        self.options_button.setToolTip("Sessions and app options")
+        self.options_button.setPopupMode(QToolButton.InstantPopup)
+        self.options_button.setMenu(self.options_menu)
+        title_row.addWidget(self.options_button)
         self.layout.addLayout(title_row)
+        self.layout.addWidget(styled_label("Local audio-to-MIDI, with tempo and time-signature controls, optional quantization, and reusable sessions. Open the web GUI for sheet music and audio/MIDI preview.", "caption"))
 
         model_section, model_layout = panel("plain")
         model_layout.setContentsMargins(0, 0, 0, 0)
@@ -367,10 +467,96 @@ class MainWindow(QMainWindow):
         self.instrument_layout.setContentsMargins(0, 0, 0, 0)
         self.instrument_layout.setSpacing(2)
         choices.setWidget(self.instrument_list)
-        options.addWidget(choices)
-        self.quantize = OptionCheckBox("Quantize MIDI for notation")
-        options.addWidget(self.quantize)
-        options.addWidget(styled_label("Off keeps performance timing. Both modes use upstream onset correction when a usable beat grid is detected.", "caption"))
+        self.instrument_choices = choices
+        instrument_resize = QVBoxLayout()
+        instrument_resize.setSpacing(3)
+        instrument_resize.addWidget(choices)
+        self.instrument_resize_handle = InstrumentResizeHandle(choices)
+        instrument_resize.addWidget(self.instrument_resize_handle)
+        options.addLayout(instrument_resize)
+        timing_main = QHBoxLayout()
+        self.tempo_mode = QComboBox()
+        self.tempo_mode.addItem("Auto", "auto"); self.tempo_mode.addItem("Manual", "manual")
+        self.tempo_meter = QComboBox()
+        self.tempo_meter.setEditable(True)
+        for meter in ("Auto", "2/4", "3/4", "4/4", "6/8", "9/8", "12/8", "5/4", "7/8"):
+            self.tempo_meter.addItem(meter)
+        self.tempo_mode.setAccessibleName("Tempo")
+        self.tempo_meter.setAccessibleName("Time signature")
+        for title, combo in (("Tempo", self.tempo_mode), ("Time signature", self.tempo_meter)):
+            column = QVBoxLayout(); column.setSpacing(5)
+            column.addWidget(styled_label(title, "caption"))
+            combo.setMinimumWidth(110)
+            column.addWidget(combo)
+            timing_main.addLayout(column, 1)
+        self.quantize = OptionCheckBox("Strict quantization")
+        timing_main.addWidget(self.quantize, 0, Qt.AlignBottom)
+        options.addLayout(timing_main)
+        self.manual_timing_widget = QWidget()
+        manual_layout = QHBoxLayout(self.manual_timing_widget); manual_layout.setContentsMargins(0,0,0,0)
+        self.tempo_bpm = QLineEdit("120"); self.tempo_bpm.setMaximumWidth(70); self.tempo_bpm.setAccessibleName("BPM")
+        manual_layout.addWidget(QLabel("BPM")); manual_layout.addWidget(self.tempo_bpm); manual_layout.addWidget(styled_label("Sets the grid; playback stays at the original speed.", "caption"))
+        options.addWidget(self.manual_timing_widget)
+        self.tempo_subdivision = QComboBox()
+        for field_label, value in (("Snap to: Auto", "auto"), ("Eighth notes", "2"), ("Sixteenth notes", "4"), ("Eighth-note triplets", "3")):
+            self.tempo_subdivision.addItem(field_label, value)
+        options.addWidget(self.tempo_subdivision)
+        self.tempo_subdivision.setVisible(False)
+        self.quantize.toggled.connect(self.tempo_subdivision.setVisible)
+        self.quantize_note = styled_label("Snaps note starts and ends to the grid. Check the click first: an incorrect grid can make rhythm worse. Turn off to restore original timing.", "caption")
+        self.quantize_note.hide(); options.addWidget(self.quantize_note)
+        self.quantize.toggled.connect(self.quantize_note.setVisible)
+        advanced_toggle = QPushButton("Advanced timing ▸")
+        advanced_toggle.setCheckable(True); advanced_toggle.setObjectName("link")
+        options.addWidget(advanced_toggle, 0, Qt.AlignLeft)
+        self.advanced_timing = QWidget()
+        advanced = QVBoxLayout(self.advanced_timing); advanced.setContentsMargins(0,0,0,0)
+        advanced.addWidget(styled_label("Tempo sets the grid without changing playback speed. Quantization moves notes.", "caption"))
+        self.tempo_unit = QComboBox()
+        for field_label, value in (("Beat unit: From time signature", "auto"), ("Quarter note", "quarter"), ("Dotted quarter", "dotted-quarter"), ("Eighth note", "eighth")):
+            self.tempo_unit.addItem(field_label, value)
+        advanced.addWidget(self.tempo_unit)
+        self.tempo_downbeat = QLineEdit("0"); self.tempo_downbeat.setAccessibleName("First downbeat seconds")
+        row = QHBoxLayout(); row.addWidget(QLabel("First downbeat (seconds)")); row.addWidget(self.tempo_downbeat); advanced.addLayout(row)
+        self.tempo_factor = QComboBox()
+        for field_label, value in (("Detected pulse: Normal", 1), ("Half tempo", .5), ("Double tempo", 2)):
+            self.tempo_factor.addItem(field_label, value)
+        advanced.addWidget(self.tempo_factor)
+        advanced.addWidget(styled_label("6/8 usually counts dotted-quarter beats. Check Auto’s meter suggestions; enter corrections below.", "caption"))
+        self.tempo_anchors = QPlainTextEdit()
+        advanced.addWidget(styled_label("Beat anchors", "caption"))
+        self.tempo_anchors.setPlaceholderText("0.5, 1\n2.5, 5")
+        self.tempo_anchors.setAccessibleName("Beat anchors"); self.tempo_anchors.setFixedHeight(65)
+        advanced.addWidget(self.tempo_anchors)
+        advanced.addWidget(styled_label("Seconds, beat number. Use at least two anchors; beat 1 is the first downbeat.", "caption"))
+        self.tempo_changes = QPlainTextEdit()
+        advanced.addWidget(styled_label("Time-signature changes", "caption"))
+        self.tempo_changes.setPlaceholderText("9, 3/4")
+        self.tempo_changes.setAccessibleName("Meter changes"); self.tempo_changes.setFixedHeight(60)
+        advanced.addWidget(self.tempo_changes)
+        advanced.addWidget(styled_label("Bar number, signature. Bar 1 starts at the first downbeat.", "caption"))
+        self.advanced_timing.hide(); options.addWidget(self.advanced_timing)
+        advanced_toggle.toggled.connect(self.advanced_timing.setVisible)
+        def tempo_mode_changed():
+            manual = self.tempo_mode.currentData() == "manual"
+            self.manual_timing_widget.setVisible(manual)
+            self.tempo_downbeat.setEnabled(manual)
+        self.tempo_mode.currentIndexChanged.connect(tempo_mode_changed)
+        tempo_mode_changed()
+        self.timing_summary = styled_label("", "caption")
+        options.addWidget(self.timing_summary)
+        self.reexport_button = QPushButton("Apply timing & save new MIDI")
+        self.reexport_button.clicked.connect(self.apply_session)
+        options.addWidget(self.reexport_button)
+        self.preview_rhythm_button = QPushButton("Preview click")
+        self.preview_rhythm_button.clicked.connect(lambda: self.send({"action": "preview_rhythm", "timing": self.timing_options()}, "Preparing click preview…"))
+        options.addWidget(self.preview_rhythm_button)
+        self.session_button = QPushButton("Save Session…")
+        self.session_button.clicked.connect(self.save_session); options.addWidget(self.session_button)
+        self.export_readiness = styled_label("", "caption")
+        self.export_readiness.hide()
+        options.addWidget(self.export_readiness)
+        self.check_exports = self.options_menu.addAction("Check Export Requirements", lambda: self.send({"action": "capabilities"}, "Checking export requirements…"))
         self.create_ab = OptionCheckBox("Create A/B audio render")
         self.create_ab.toggled.connect(self.refresh)
         options.addWidget(self.create_ab)
@@ -412,6 +598,15 @@ class MainWindow(QMainWindow):
         self.transcribe_button.setObjectName("primary")
         self.transcribe_button.clicked.connect(self.transcribe)
         self.layout.addWidget(self.transcribe_button, 0, Qt.AlignLeft)
+        self.finish_button = QPushButton("Finish here & save MIDI")
+        self.finish_button.setToolTip("Saves fully completed 5-second sections. The unfinished section is omitted.")
+        self.finish_button.clicked.connect(self.finish_transcription)
+        self.layout.addWidget(self.finish_button, 0, Qt.AlignLeft)
+        self.finish_hint = styled_label("", "caption")
+        self.layout.addWidget(self.finish_hint)
+        self.cancel_button = QPushButton("Cancel operation")
+        self.cancel_button.clicked.connect(self.cancel_operation)
+        self.layout.addWidget(self.cancel_button, 0, Qt.AlignLeft)
         self.error = styled_label("", "error")
         self.layout.addWidget(self.error)
         self.retry_button = QPushButton("Try Again")
@@ -420,35 +615,38 @@ class MainWindow(QMainWindow):
         self.warning = styled_label("", "warning")
         self.layout.addWidget(self.warning)
 
-        divider = QWidget()
-        divider.setObjectName("divider")
-        divider.setFixedHeight(1)
-        self.layout.addWidget(divider)
-        model_folder, folder_layout = panel("plain", 5)
-        folder_layout.setContentsMargins(0, 0, 0, 0)
-        folder_layout.addWidget(styled_label("Model download folder", "captionHeading"))
-        self.model_path = styled_label("Checking…", "path")
-        folder_layout.addWidget(self.model_path)
-        self.layout.addWidget(model_folder)
+        self.info_dialog = QDialog(self)
+        self.info_dialog.setWindowTitle("MuScriptor — App Information")
+        self.info_dialog.resize(470, 360)
+        info = QVBoxLayout(self.info_dialog); info.setContentsMargins(22, 22, 22, 22); info.setSpacing(12)
+        info.addWidget(styled_label("MuScriptor", "title"))
+        info.addWidget(styled_label("Independent adaptation by Pokestir", "caption"))
+        version_file = self.resources / "VERSION"
+        version = version_file.read_text().strip() if version_file.is_file() else "1.0.0-rc.1"
+        info.addWidget(styled_label("Version " + version, "caption"))
         self.footer = styled_label("Audio stays on this PC", "caption")
-        self.layout.addWidget(self.footer)
+        info.addWidget(self.footer)
         self.hardware = styled_label("Detecting available processors…", "caption")
-        self.layout.addWidget(self.hardware)
-        processor, processor_layout = panel("plain", 8)
-        processor_layout.setContentsMargins(0, 0, 0, 0)
-        self.processor_toggle = QPushButton("▸ Processor settings")
-        self.processor_toggle.setObjectName("link")
-        self.processor_toggle.setCheckable(True)
-        self.processor_toggle.toggled.connect(self.refresh)
-        processor_layout.addWidget(self.processor_toggle, 0, Qt.AlignLeft)
+        info.addWidget(self.hardware)
+        info.addWidget(styled_label("Processor", "captionHeading"))
         self.device = QComboBox()
         self.device.addItem("Automatic", "auto")
         self.device.setAccessibleName("Processor")
         self.device.currentIndexChanged.connect(self.select_device)
-        processor_layout.addWidget(self.device)
+        info.addWidget(self.device)
         self.memory_note = styled_label("Memory figures show total capacity, not free memory.", "caption")
-        processor_layout.addWidget(self.memory_note)
-        self.layout.addWidget(processor)
+        info.addWidget(self.memory_note)
+        info.addWidget(styled_label("Model download folder", "captionHeading"))
+        self.model_path = styled_label("Checking…", "path")
+        info.addWidget(self.model_path)
+        self.model_folder_button = QPushButton("Open Model Folder")
+        self.model_folder_button.clicked.connect(self.open_model_folder)
+        info.addWidget(self.model_folder_button, 0, Qt.AlignLeft)
+        info.addWidget(styled_label("Audio is processed on this computer. Original MuScriptor by Kyutai and Mirelo.", "caption"))
+        done = QPushButton("Done"); done.clicked.connect(self.info_dialog.accept)
+        info.addWidget(done, 0, Qt.AlignRight)
+        self.options_menu.addAction("Processor and App Information…", self.show_app_info)
+        self.model_folder_action = self.options_menu.addAction("Open Model Folder", self.open_model_folder)
         self.layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -457,23 +655,50 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(scroll)
         menu = self.menuBar().addMenu("App")
         self.repair_action = menu.addAction("Repair Dependencies…", self.repair)
-        menu.addAction("Show Logs", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.support / "Logs"))))
+        logs_action = menu.addAction("Show Logs", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.support / "Logs"))))
+        self.options_menu.addAction(self.repair_action)
+        self.options_menu.addAction(logs_action)
         self.update_instruments()
         self.refresh()
         if autostart:
             QTimer.singleShot(0, self.start)
 
+    def show_app_info(self):
+        self.info_dialog.show()
+        self.info_dialog.raise_()
+        self.info_dialog.activateWindow()
+
+    def open_model_folder(self):
+        path = self.model_path.text()
+        if path and path != "Checking…":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def update_header_logo(self):
+        variant = "dark" if self.palette().window().color().lightness() < 128 else "light"
+        image = QPixmap(str(self.resources / f"assets/muscriptor-header-{variant}.png"))
+        if not image.isNull():
+            image = image.scaled(228, 144, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            image.setDevicePixelRatio(3)
+            self.header_logo.setPixmap(image)
+
     def apply_theme(self):
+        if hasattr(self, "header_logo"):
+            self.update_header_logo()
         dark = self.palette().window().color().lightness() < 128
         bg, card, field = ("#1e2528", "#242a2e", "#1e2528") if dark else ("#fafafa", "#f1f2f2", "#ffffff")
         text, muted, border = ("#dedfe0", "#a4a7a9", "#363d41") if dark else ("#25262a", "#666973", "#d4d5da")
+        if hasattr(self, "options_button"):
+            self.options_button.setIcon(settings_icon(QColor(text)))
         segment, selected = ("#30373b", "#474e52") if dark else ("#e5e6e7", "#ffffff")
         accent = "#479aff" if dark else "#007aff"
         self.setStyleSheet(f"""
-            QMainWindow, QWidget#content {{ background: {bg}; }}
+            QMainWindow, QDialog, QWidget#content {{ background: {bg}; }}
             QWidget {{ color: {text}; font-family: 'Segoe UI', sans-serif; font-size: 13px; }}
             QLabel {{ background: transparent; border: none; }}
-            QLabel#title {{ font-size: 25px; font-weight: 600; }}
+            QLabel#title {{ font-size: 29px; font-weight: 600; }}
+            QToolButton#optionsGear {{ border: none; background: transparent; padding: 2px; }}
+            QToolButton#optionsGear:hover {{ background: {segment}; border-radius: 5px; }}
+            QToolButton#optionsGear::menu-indicator {{ image: none; }}
             QLabel#heading {{ font-size: 13px; font-weight: 600; }}
             QLabel#secondary, QLabel#caption, QLabel#path {{ color: {muted}; }}
             QLabel#caption, QLabel#path, QLabel#captionHeading, QLabel#tertiary {{ font-size: 11px; }}
@@ -526,6 +751,16 @@ class MainWindow(QMainWindow):
         for widget in (self.model, self.model_segments, self.device, self.audio_button,
                        self.change_audio, self.folder_button, self.options_widget):
             widget.setEnabled(not self.busy and self.web_url is None)
+        self.finish_button.setVisible(self.busy and (self.finish_ready or self.finishing))
+        self.finish_button.setEnabled(self.finish_ready and not self.finishing)
+        self.finish_button.setText("Finishing…" if self.finishing else "Finish here & save MIDI")
+        self.finish_hint.setVisible(self.busy and self.finish_ready)
+        self.finish_hint.setText(f"{self.completed_seconds:.0f} seconds completed. Finish here keeps these sections and skips the rest.")
+        self.cancel_button.setVisible(self.busy and self.worker is not None and self.installer is None and self.web_url is None)
+        self.open_session_action.setEnabled(not self.busy and self.web_url is None)
+        self.recover_action.setEnabled(bool(self.recovery_path) and not self.busy and self.web_url is None)
+        self.check_exports.setEnabled(not self.busy and self.web_url is None)
+        self.session_button.setVisible(self.has_session)
         self.web_button.setEnabled(not self.busy and not self.setup)
         self.web_widget.setVisible(self.web_url is not None)
         self.model_buttons.button(self.model.currentIndex()).setChecked(True)
@@ -552,17 +787,18 @@ class MainWindow(QMainWindow):
         self.transcribe_button.setEnabled(not self.busy and not self.setup and self.destination is not None)
         self.complete_widget.setVisible(self.result is not None and not self.busy)
         self.result_name.setText(self.result.name if self.result else "")
-        self.options_widget.setVisible(not self.setup and self.result is None)
+        self.options_widget.setVisible(not self.setup or self.has_session)
+        self.reexport_button.setVisible(self.result is not None)
+        self.preview_rhythm_button.setVisible(self.result is not None)
         self.soundfont_widget.setVisible(self.create_ab.isChecked())
         self.ab_widget.setVisible(self.ab_result is not None)
         self.ab_path.setText(str(self.ab_result or ""))
         self.error.setVisible(bool(self.error.text()))
         self.warning.setVisible(bool(self.warning.text()))
         self.retry_button.setVisible(bool(self.error.text()) and not self.busy)
-        expanded = self.processor_toggle.isChecked()
-        self.processor_toggle.setText(("▾" if expanded else "▸") + " Processor settings")
-        self.device.setVisible(expanded)
-        self.memory_note.setVisible(expanded)
+        folder_ready = bool(self.model_path.text()) and self.model_path.text() != "Checking…"
+        self.model_folder_action.setEnabled(folder_ready)
+        self.model_folder_button.setEnabled(folder_ready)
         self.footer.setText("MuScriptor " + self.model.currentData().title() + " • " + self.backend + " • Audio stays on this PC")
         if self.web_url:
             for widget in (self.audio_button, self.source_widget, self.options_widget,
@@ -572,7 +808,7 @@ class MainWindow(QMainWindow):
     def open_web_gui(self):
         if self.web_url:
             QDesktopServices.openUrl(QUrl(self.web_url))
-        elif not self.busy and not self.setup:
+        elif not self.busy and not self.setup and self.confirm_discard_timing():
             self.send({"action": "web_gui"}, "Opening the local web GUI…")
 
     def return_to_desktop(self):
@@ -593,6 +829,9 @@ class MainWindow(QMainWindow):
                 self.fail("The web GUI is still stopping. Try Return to Desktop again.")
                 return
         self.web_url = None
+        self.restore_latest_after_restart = True
+        self.restore_after_restart = self.pending_timing = None
+        self.has_session = False
         self.start()
 
     @staticmethod
@@ -669,8 +908,7 @@ class MainWindow(QMainWindow):
             return
         if self.frozen:
             try:
-                shutil.copy2(self.resources / "src/worker.py", self.root / "src/worker.py")
-                shutil.copytree(self.resources / "upstream/muscriptor/web_dist", self.root / "upstream/muscriptor/web_dist", dirs_exist_ok=True)
+                install_engine(self.root, self.resources / "src/worker.py", self.resources / "upstream/muscriptor")
             except OSError:
                 self.fail("The local engine could not be updated. Use Repair Dependencies.")
                 return
@@ -688,13 +926,20 @@ class MainWindow(QMainWindow):
         if log.exists() and log.stat().st_size > 4_000_000:
             log.replace(log.with_name("upstream.previous.log"))
         process.setStandardErrorFile(str(log), QProcess.Append)
-        process.readyReadStandardOutput.connect(self.read_events)
+        process.readyReadStandardOutput.connect(lambda: self.read_events(process))
         process.finished.connect(lambda *_: self.engine_stopped(process))
         process.errorOccurred.connect(lambda _: self.fail("The local engine could not start. Use Repair Dependencies.") if process.error() == QProcess.FailedToStart else None)
         process.start(str(self.python), ["-u", str(self.root / "src/worker.py"), "--model", self.model.currentData(), "--device", str(self.settings.value("device", "auto"))])
 
     def engine_stopped(self, process):
         if self.worker is process and not self.closing:
+            if self.web_url:
+                self.restore_latest_after_restart = True
+                self.restore_after_restart = self.pending_timing = None
+            else:
+                self.restore_after_restart = self.recovery_path if self.has_session else None
+                self.pending_timing = self.timing_options() if self.restore_after_restart else None
+            self.has_session = False
             self.worker = None
             self.web_url = None
             self.fail("The engine stopped. Click Try Again to restart it.")
@@ -712,7 +957,9 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.worker.write((json.dumps(command) + "\n").encode())
 
-    def read_events(self):
+    def read_events(self, process=None):
+        if self.worker is None or (process is not None and process is not self.worker):
+            return
         self.buffer += bytes(self.worker.readAllStandardOutput())
         while b"\n" in self.buffer:
             line, self.buffer = self.buffer.split(b"\n", 1)
@@ -745,7 +992,19 @@ class MainWindow(QMainWindow):
             self.device.blockSignals(False)
             if sys.platform == "win32" and not any(d["id"].startswith(("cuda:", "privateuseone:")) for d in event.get("devices", [])):
                 self.hardware.setText(self.hardware.text() + "\nNo supported GPU is available to the engine. For AMD graphics, update the driver and choose App → Repair Dependencies to install DirectML support.")
+        elif kind == "capabilities":
+            self.busy = False
+            self.export_readiness.show()
+            self.export_readiness.setText("MIDI: ready. Sheet music in Web GUI: " + ("ready." if event.get("sheets") else "install MuseScore 4+.") + " A/B audio: " + ("choose a local SF2 SoundFont." if event.get("fluidsynth") else "install FluidSynth and choose a local SF2 SoundFont."))
+        elif kind == "session_saved":
+            self.saved_timing = json.dumps(self.timing_options(), sort_keys=True)
+            self.busy = False; self.status.setText("Session saved.")
+        elif kind == "session_loaded":
+            self.has_session = True
+            self.source = self.destination = self.ab_result = None
+            self.restore_timing(event.get("timing", {}))
         elif kind == "ready":
+            self.recovery_path = event.get("recovery_path")
             self.instrument_groups = event.get("instruments", self.instrument_groups)
             self.update_instruments()
             self.setup = not event["cached"]
@@ -754,9 +1013,18 @@ class MainWindow(QMainWindow):
             self.model_path.setText(event.get("directory", ""))
             self.busy = False
             self.status.setText("Choose audio and review its destination before transcribing.")
+            if self.restore_latest_after_restart:
+                self.restore_latest_after_restart = False
+                self.restore_after_restart = self.recovery_path
+            if self.restore_after_restart:
+                path, self.restore_after_restart = self.restore_after_restart, None
+                self.open_session(path)
+            elif self.source and not self.destination:
+                self.plan()
         elif kind == "authenticated":
             self.authenticated = True
         elif kind == "status":
+            self.finish_ready = False
             self.status.setText(event["message"])
             self.progress.setRange(0, 0)
         elif kind in ("download", "progress"):
@@ -767,21 +1035,37 @@ class MainWindow(QMainWindow):
                 self.model_path.setText(event["directory"])
                 self.status.setText(f"Downloading {self.model.currentData().title()}… {completed / 1e9:.2f} / {total / 1e9:.2f} GB")
             else:
-                self.status.setText("Transcribing…")
+                self.finish_ready = bool(event.get("can_finish", False)) and not self.finishing
+                self.completed_seconds = event.get("completed_seconds", 0)
+                self.status.setText("Finishing completed sections and saving MIDI…" if self.finishing else "Transcribing…")
         elif kind == "planned":
             self.destination = Path(event["path"])
             self.busy = False
             self.status.setText("Ready when you are.")
+        elif kind == "rhythm_preview":
+            self.busy = False
+            self.timing_summary.setText(event.get("message", ""))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(event["path"]))
         elif kind == "complete":
+            self.finish_ready = self.finishing = False; self.transcription_id = None
+            self.has_session = event.get("session", False)
+            if self.has_session: self.recovery_path = event.get("recovery_path")
+            self.timing_summary.setText(event.get("timing_summary", ""))
             self.ab_result = Path(event["ab_path"]) if event.get("ab_path") else None
             self.result = self.destination = Path(event["path"])
             self.busy = False
-            self.status.setText("Transcription complete.")
+            self.status.setText(f"Partial MIDI saved: first {event.get('completed_seconds', 0):.1f} seconds." if event.get("partial") else "Transcription complete.")
+            self.saved_timing = json.dumps(self.timing_options(), sort_keys=True)
+            if self.pending_timing is not None:
+                timing, self.pending_timing = self.pending_timing, None
+                self.restore_timing(timing)
             if event.get("needs_save"):
                 QTimer.singleShot(0, self.save_copy)
         elif kind == "warning":
             self.warning.setText("\n\n".join(filter(None, (self.warning.text(), event["message"]))))
         elif kind == "error":
+            self.pending_timing = None
+            self.finish_ready = self.finishing = False; self.transcription_id = None
             if event.get("code") == "dependencies":
                 self.dependency_failed = True
             if event.get("code") == "auth":
@@ -819,11 +1103,14 @@ class MainWindow(QMainWindow):
             self.stage(Path(path))
 
     def stage(self, path):
+        if not self.confirm_discard_timing(): return
         if self.busy:
             return
         if not path.is_file():
             self.fail("Choose an audio file stored on this computer.")
             return
+        self.has_session = False
+        self.timing_summary.clear()
         self.source, self.destination, self.result = path, None, None
         self.ab_result = None
         self.plan()
@@ -839,14 +1126,96 @@ class MainWindow(QMainWindow):
         if folder:
             self.plan(folder)
 
+    def timing_options(self):
+        return dict(mode=self.tempo_mode.currentData(), bpm=self.tempo_bpm.text(), meter=self.tempo_meter.currentText().strip().lower(),
+                    first_downbeat=self.tempo_downbeat.text(), unit=self.tempo_unit.currentData(),
+                    quantize=self.quantize.isChecked(), subdivision=self.tempo_subdivision.currentData(),
+                    factor=self.tempo_factor.currentData(), anchors=self.tempo_anchors.toPlainText(),
+                    meter_changes=self.tempo_changes.toPlainText())
+
     def transcribe(self):
         if not self.busy and not self.setup and self.source and self.destination:
-            command = {"action": "transcribe", "path": str(self.source), "destination": str(self.destination),
+            self.transcription_id = uuid.uuid4().hex
+            self.finish_ready = self.finishing = False; self.completed_seconds = 0
+            command = {"action": "transcribe", "run_id": self.transcription_id, "path": str(self.source), "destination": str(self.destination),
                        "instruments": list(self.selected_instruments), "quantize": self.quantize.isChecked(),
-                       "create_ab": self.create_ab.isChecked()}
+                       "create_ab": self.create_ab.isChecked(), "timing": self.timing_options()}
             if self.soundfont:
                 command["soundfont"] = str(self.soundfont)
             self.send(command, "Reading audio…")
+
+    def confirm_discard_timing(self):
+        if not self.has_session or self.saved_timing == json.dumps(self.timing_options(), sort_keys=True):
+            return True
+        from PySide6.QtWidgets import QMessageBox
+        return QMessageBox.question(self, "Unsaved timing changes", "Discard unsaved timing changes? Save Session or Apply timing keeps them. The last applied session remains recoverable.", QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel) == QMessageBox.Discard
+
+    def finish_transcription(self):
+        if not self.busy or not self.finish_ready or self.finishing or not self.transcription_id:
+            return
+        self.finishing = True; self.finish_ready = False
+        warning = self.warning.text()
+        self.send({"action": "finish_transcription", "run_id": self.transcription_id}, "Finishing completed sections and saving MIDI…")
+        self.warning.setText(warning)
+        self.refresh()
+
+    def cancel_operation(self):
+        self.finish_ready = self.finishing = False; self.transcription_id = None
+        if not self.busy or not self.worker or self.installer:
+            return
+        self.restore_after_restart = self.recovery_path if self.has_session else None
+        self.pending_timing = self.timing_options() if self.has_session else None
+        process, self.worker = self.worker, None
+        if sys.platform == "win32":
+            QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
+        process.kill()
+        if not process.waitForFinished(3000):
+            self.worker = process
+            self.status.setText("The operation is still stopping. Try Cancel again.")
+            self.busy = True
+            self.refresh()
+            return
+        self.has_session = False
+        self.warning.setText("Operation cancelled. Your file and settings were kept.")
+        self.start()
+
+    def open_session(self, path=None):
+        if self.busy or self.web_url:
+            return
+        if self.pending_timing is None and not self.confirm_discard_timing():
+            return
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Open MuScriptor Session", "", "MuScriptor session (*.muscriptor)")
+        if path:
+            self.send({"action": "load_session", "path": str(path)}, "Opening session…")
+
+    def save_session(self):
+        if self.busy or not self.has_session:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Session", "Transcription.muscriptor", "MuScriptor session (*.muscriptor)")
+        if path:
+            self.send({"action": "save_session", "path": path, "timing": self.timing_options()}, "Saving session…")
+
+    def apply_session(self):
+        if self.busy or not self.has_session:
+            return
+        command = {"action": "reexport_session", "timing": self.timing_options()}
+        if self.destination: command["destination"] = str(self.destination)
+        self.send(command, "Updating MIDI…")
+
+    def restore_timing(self, t):
+        for widget, key, fallback in ((self.tempo_mode,"mode","auto"), (self.tempo_unit,"unit","auto"),
+                                      (self.tempo_subdivision,"subdivision","auto"), (self.tempo_factor,"factor",1)):
+            value = t.get(key, fallback)
+            if key == "factor": value = float(value)
+            if key == "subdivision": value = str(value)
+            widget.setCurrentIndex(max(0, widget.findData(value)))
+        self.tempo_meter.setCurrentText(str(t.get("meter", "auto")).replace("auto", "Auto"))
+        self.tempo_bpm.setText(str(t.get("bpm", 120))); self.tempo_downbeat.setText(str(t.get("first_downbeat", 0)))
+        self.quantize.setChecked(t.get("quantize", False))
+        anchors = t.get("anchors", "")
+        if isinstance(anchors, list): anchors = "\n".join(f"{a[0]}, {a[1]}" for a in anchors)
+        self.tempo_anchors.setPlainText(anchors); self.tempo_changes.setPlainText(t.get("meter_changes", ""))
 
     def save_copy(self):
         if not self.result:
@@ -867,6 +1236,8 @@ class MainWindow(QMainWindow):
                 self.fail("The MIDI could not be saved there. Choose another folder.")
 
     def another(self):
+        if not self.confirm_discard_timing(): return
+        self.has_session = False
         self.source = self.destination = self.result = self.ab_result = None
         self.error.clear()
         self.warning.clear()
@@ -892,6 +1263,10 @@ class MainWindow(QMainWindow):
             self.fail("Use the macOS app to repair this Mac’s environment.")
             return
         self.dependency_failed = True
+        if self.has_session:
+            self.restore_after_restart = self.recovery_path
+            self.pending_timing = self.timing_options() if self.recovery_path else None
+            self.has_session = False
         if self.worker:
             process, self.worker = self.worker, None
             process.kill()
@@ -950,6 +1325,8 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def closeEvent(self, event):
+        if not self.confirm_discard_timing():
+            event.ignore(); return
         self.closing = True
         for process in (self.worker, self.installer):
             if process and process.state() != QProcess.NotRunning:

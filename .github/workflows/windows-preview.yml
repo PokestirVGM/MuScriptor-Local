@@ -43,6 +43,14 @@ jobs:
           QT_QPA_PLATFORM: windows
           QT_SCALE_FACTOR: '1.5'
         run: python -m unittest discover -s tests -p test_windows_ui.py -v
+      - name: Test browser playback and session state
+        run: node --test tests/web_state.test.cjs
+      - name: Check desktop layout at 200 percent scaling
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+          QT_SCALE_FACTOR: '2'
+        run: python -m unittest discover -s tests -p test_windows_ui.py -v
       - uses: actions/upload-artifact@v4
         with:
           name: Windows-UI-Previews
@@ -57,7 +65,7 @@ jobs:
         shell: pwsh
         run: |
           $directory = "$env:RUNNER_TEMP/MuScriptor Installed"
-          $setup = Start-Process 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe' -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$directory`"" -Wait -PassThru
+          $setup = Start-Process 'dist/windows/MuScriptor-Local-1.0-RC1-Windows-x64-Setup.exe' -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$directory`"" -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw 'Setup installer failed.' }
           $app = Start-Process "$directory/MuScriptor Local.exe" -ArgumentList '--smoke-test' -PassThru
           if (!$app.WaitForExit(30000)) { $app.Kill(); throw 'Installed app startup timed out.' }
@@ -71,8 +79,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Worker checks failed.' }
           & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_mac_options.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Shared transcription option checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p "test_rhythm*.py" -v
+          if ($LASTEXITCODE -ne 0) { throw 'Tempo and MIDI alignment checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_release_ready.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Session recovery and upgrade checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_finish_transcription.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Finish here and cancellation checks failed.' }
           & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_web_gui.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Local web GUI checks failed.' }
+          & "$env:RUNNER_TEMP/MuScriptor Engine/.venv/Scripts/python.exe" -m unittest discover -s tests -p test_audio_validation.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Audio validation checks failed.' }
       - name: Check DirectML installation and adapter without a physical GPU
         shell: pwsh
         run: |

@@ -1,0 +1,3110 @@
+diff --git a/muscriptor/server.py b/muscriptor/server.py
+index c9933d1..76e3b8a 100644
+--- a/muscriptor/server.py
++++ b/muscriptor/server.py
+@@ -34,10 +34,12 @@ import threading
+ import time
+ import wave
+ import zipfile
++import uuid
++from collections import OrderedDict
+ from pathlib import Path
+ from typing import Annotated, Callable
+ 
+-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
++from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, Body
+ from fastapi.responses import FileResponse, Response, StreamingResponse
+ from fastapi.staticfiles import StaticFiles
+ from starlette.background import BackgroundTask
+@@ -46,8 +48,9 @@ from muscriptor.events import NoteEndEvent, NoteStartEvent, ProgressEvent
+ from muscriptor.soundfonts import SF3_URL
+ from muscriptor.tokenizer.mt3 import MT3_FULL_PLUS_GROUP_NAMES
+ from muscriptor.transcription_model import TranscriptionModel
+-from muscriptor.utils.audio import _read_non_wav_file, _read_wav_file
++from muscriptor.utils.audio import read_audio
+ from muscriptor.utils.beats import BeatDetectionError, TempoDetection
++from muscriptor.utils import rhythm
+ from muscriptor.utils.download import download_if_necessary
+ from muscriptor.utils.sheets import (
+     MuseScoreError,
+@@ -113,7 +116,7 @@ def event_to_dict(ev: NoteStartEvent | NoteEndEvent) -> dict:
+     }
+ 
+ 
+-def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) -> FastAPI:
++def create_app(model: TranscriptionModel, web_dir: str | Path | None = None, recovery_path: Path | None = None, app_info: dict | None = None) -> FastAPI:
+     app = FastAPI(title="muscriptor")
+ 
+     transcribe_lock = threading.Lock()
+@@ -132,6 +135,7 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+     cancel_guard = threading.Lock()
+     current_cancel: threading.Event | None = None
+     current_client: str | None = None
++    current_finish = None
+     # Bound on how long a same-client resubmit waits for the run it just
+     # cancelled to unwind and release the lock. That run stops within one
+     # chunk boundary, so this only needs to cover that latency — unlike
+@@ -197,10 +201,36 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+             current_client = client_id
+         return cancel, _make_release_once(transcribe_lock)
+ 
++    @app.post("/transcribe/cancel")
++    async def cancel_transcription(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        with cancel_guard:
++            if (current_finish is None or not x_client_id or current_finish[0] != x_client_id
++                    or not body.get("run_id") or current_finish[1] != body["run_id"] or current_cancel is None):
++                raise HTTPException(404, "This transcription is no longer running.")
++            current_cancel.set()
++            return {"cancelling": True}
++
++    @app.post("/transcribe/finish")
++    async def finish_transcription(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        with cancel_guard:
++            if (current_finish is None or not x_client_id or current_finish[0] != x_client_id
++                    or not body.get("run_id") or current_finish[1] != body["run_id"]):
++                raise HTTPException(404, "This transcription is no longer running.")
++            run = current_finish[2]
++            if not run.can_finish:
++                raise HTTPException(409, "Wait for a completed section, or download the completed result.")
++            run.finish.set()
++            return {"finishing": True, "completed_seconds": run.completed_seconds}
++
+     @app.get("/health")
+     async def health():
+         return {"status": "ok"}
+ 
++    @app.get("/app-info")
++    async def application_info():
++        return {key: str(value) for key in ("model", "processor", "model_directory")
++                if (value := (app_info or {}).get(key)) is not None}
++
+     @app.get("/instruments")
+     async def list_instruments():
+         return {"instruments": list(MT3_FULL_PLUS_GROUP_NAMES.keys())}
+@@ -215,6 +245,93 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+         path = await asyncio.to_thread(download_if_necessary, SF3_URL)
+         return FileResponse(path, media_type="application/octet-stream")
+ 
++    # Bounded in-memory cache of MIDI + beat timestamps, never model weights or audio.
++    rhythm_sessions = OrderedDict()
++    rhythm_guard = threading.Lock()
++
++    def rhythm_payload(raw, detection, settings, duration):
++        timeline = rhythm.Timeline(settings, detection, duration)
++        result = rhythm.retime(raw, timeline)
++        result["quantized_midi"] = result["data"] if result["quantized"] else None
++        # Comparison audio must always share the original timeline, even when
++        # the separately downloaded MIDI is quantized.
++        original = rhythm.retime(raw, rhythm.Timeline({**settings, "quantize": False}, detection, duration))
++        result["performance_midi"] = original["data"]
++        return result
++
++    @app.post("/rhythm/reexport")
++    async def reexport(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        with rhythm_guard:
++            cached = rhythm_sessions.get(body.get("session"))
++        if cached is None or cached[0] != x_client_id:
++            raise HTTPException(404, "This transcription is no longer cached. Transcribe the recording again.")
++        _, raw, detection, duration = cached
++        try:
++            result = await asyncio.to_thread(rhythm_payload, raw, detection, body.get("timing", {}), duration)
++        except rhythm.RhythmError as exc:
++            raise HTTPException(422, str(exc)) from exc
++        result["session"] = body["session"]
++        return result
++
++    @app.get("/session/recovery")
++    async def get_recovery():
++        from muscriptor.utils import session
++        if recovery_path is None or not recovery_path.is_file():
++            raise HTTPException(404, "No recovery session is available.")
++        try:
++            return await asyncio.to_thread(session.read, recovery_path)
++        except (OSError, rhythm.RhythmError) as exc:
++            raise HTTPException(422, "The recovery file could not be opened.") from exc
++
++    @app.get("/session/recovery/status")
++    async def recovery_status():
++        return {"available": recovery_path is not None and recovery_path.is_file()}
++
++    @app.post("/session/recovery")
++    async def save_recovery(body: Annotated[dict, Body()]):
++        from muscriptor.utils import session
++        if recovery_path is None:
++            raise HTTPException(404, "Local recovery storage is unavailable.")
++        try:
++            await asyncio.to_thread(session.write_recovery, recovery_path, body)
++        except (OSError, rhythm.RhythmError) as exc:
++            raise HTTPException(422, str(exc)) from exc
++        return {"saved": True}
++
++    @app.get("/capabilities")
++    async def export_capabilities():
++        from muscriptor.utils.capabilities import capabilities
++        return await asyncio.to_thread(capabilities)
++
++    @app.post("/session/export")
++    async def export_session(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        from muscriptor.utils import session
++        with rhythm_guard:
++            cached = rhythm_sessions.get(body.get("session"))
++        if cached is None or cached[0] != x_client_id:
++            raise HTTPException(404, "Session expired. Open a saved session or transcribe again.")
++        _, raw, detection, duration = cached
++        try:
++            return session.make(raw, detection, duration, body.get("timing", {}), str(body.get("name", "Recording")))
++        except rhythm.RhythmError as exc:
++            raise HTTPException(422, str(exc)) from exc
++
++    @app.post("/session/import")
++    async def import_session(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        from muscriptor.utils import session
++        try:
++            raw, detection, duration, timing, _, name, _ = session.validate(body)
++            result = await asyncio.to_thread(rhythm_payload, raw, detection, timing, duration)
++        except (rhythm.RhythmError, ValueError, TypeError) as exc:
++            raise HTTPException(422, str(exc)) from exc
++        token = uuid.uuid4().hex
++        with rhythm_guard:
++            rhythm_sessions[token] = (x_client_id, raw, detection, duration)
++            while len(rhythm_sessions) > 4:
++                rhythm_sessions.popitem(last=False)
++        result.update(session=token, timing=timing, name=name)
++        return result
++
+     @app.post("/transcribe")
+     async def transcribe(
+         file: Annotated[UploadFile, File()],
+@@ -222,24 +339,24 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+         # "true" fails loudly on tempo detection errors, "false" doesn't even try
+         detect_tempo: Annotated[TempoDetection, Form()] = "best-effort",
+         x_client_id: Annotated[str | None, Header()] = None,
++        timing: Annotated[str | None, Form()] = None,
++        run_id: Annotated[str | None, Form()] = None,
+     ) -> StreamingResponse:
++        timing_settings = None
++        if timing is not None:
++            try:
++                timing_settings = json.loads(timing)
++                rhythm.options(timing_settings)
++            except (ValueError, TypeError) as exc:
++                raise HTTPException(422, str(exc)) from exc
+         data = await file.read()
+-        # PCM WAV goes through the stdlib reader (keeps WAV decoding byte-for-byte
+-        # identical to the CLI); anything that isn't a readable WAV (mp3, flac,
+-        # ogg, m4a, …) falls back to soundfile/libsndfile. A genuinely
+-        # undecodable upload (corrupt/truncated file, or a format libsndfile
+-        # can't read) is the client's fault, so report it as a 400 rather than
+-        # letting it surface as a 500.
+         try:
+-            wav, sr = _read_wav_file(io.BytesIO(data))
+-        except (wave.Error, EOFError):
+-            try:
+-                wav, sr = _read_non_wav_file(io.BytesIO(data))
+-            except Exception as e:
+-                raise HTTPException(
+-                    status_code=400,
+-                    detail=f"could not decode audio file '{file.filename}': {e}",
+-                ) from e
++            wav, sr = read_audio(io.BytesIO(data))
++        except Exception as e:
++            raise HTTPException(
++                status_code=400,
++                detail=f"Could not read audio file '{file.filename}': {e}",
++            ) from e
+ 
+         unknown = [n for n in instruments if n not in MT3_FULL_PLUS_GROUP_NAMES]
+         if unknown:
+@@ -259,19 +376,28 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+             x_client_id, cancellable=True
+         )
+ 
++        from muscriptor.utils.partial import FinishableTranscription
++        nonlocal current_finish
++        run = FinishableTranscription(model.transcribe((wav, sr), instruments=instruments or None,
++                                      batch_size=1, no_eos_is_ok=True), wav.shape[-1] / sr, threading.Event())
++        with cancel_guard:
++            current_finish = (x_client_id, run_id, run)
++        release_inference = release_lock
++        def release_lock():
++            nonlocal current_finish
++            with cancel_guard:
++                if current_finish is not None and current_finish[2] is run:
++                    current_finish = None
++            release_inference()
++
+         def gen():
+             try:
+-                events: list[NoteStartEvent | NoteEndEvent] = []
+                 # batch_size=1 so each chunk's notes stream out as soon as it is
+                 # generated, instead of waiting for a whole batch of chunks.
+                 # no_eos_is_ok=True so one runaway chunk that never emits EOS only
+                 # warns (and keeps its notes) instead of aborting the whole stream.
+-                for ev in model.transcribe(
+-                    (wav, sr),
+-                    instruments=instruments or None,
+-                    batch_size=1,
+-                    no_eos_is_ok=True,
+-                ):
++                stream = iter(run)
++                for ev in stream:
+                     # A newer request preempted this run — stop generating
+                     # (closing the model.transcribe generator) and release the
+                     # lock via the finally, at most one chunk after the signal.
+@@ -285,11 +411,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                                 "type": "progress",
+                                 "completed": ev.completed,
+                                 "total": ev.total,
++                                "can_finish": run.can_finish,
++                                "completed_seconds": run.completed_seconds,
+                             }
+                         )
+                         yield f"data: {payload}\n\n"
+                         continue
+-                    events.append(ev)
+                     payload = json.dumps(event_to_dict(ev))
+                     yield f"data: {payload}\n\n"
+                 # All notes streamed — build the MIDI file in memory (reusing the
+@@ -297,9 +424,33 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                 # with the bytes base64-encoded.
+                 if cancel.is_set():
+                     return
++                yield f"data: {json.dumps({'type': 'finalizing'})}\n\n"
++                events = run.events
++                export_wav = wav[..., :round(run.duration * sr)] if run.partial else wav
+                 # Detect tempo/meter only now: it costs a few seconds of CPU and
+                 # nothing before this point needs it, so the notes stream first.
+-                grid = model.detect_beat_grid_for((wav, sr), detect_tempo)
++                if timing_settings is not None:
++                    detection = rhythm.detect(export_wav, sr)
++                    raw = model.events_to_midi_bytes(iter(events), beat_grid=None, quantize=False)
++                    duration = run.duration
++                    session = uuid.uuid4().hex
++                    with rhythm_guard:
++                        rhythm_sessions[session] = (x_client_id, raw, detection, duration)
++                        while len(rhythm_sessions) > 4:
++                            rhythm_sessions.popitem(last=False)
++                    try:
++                        result = rhythm_payload(raw, detection, timing_settings, duration)
++                    except rhythm.RhythmError as exc:
++                        # Keep the completed transcription available so a failed
++                        # grid can be corrected without repeating inference.
++                        result = rhythm_payload(raw, detection, {}, duration)
++                        result['warnings'].append(str(exc))
++                    if run.partial:
++                        result['warnings'].append(run.notice)
++                    result.update(type="transcription_complete", session=session, partial=run.partial)
++                    yield f"data: {json.dumps(result)}\n\n"
++                    return
++                grid = model.detect_beat_grid_for((export_wav, sr), detect_tempo)
+                 # Measure the onset lag up here rather than leaving it to the MIDI
+                 # writing, since the UI has to be told the very same number to move
+                 # the notes it already drew.
+@@ -327,6 +478,8 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                 payload = json.dumps(
+                     {
+                         "type": "transcription_complete",
++                        "partial": run.partial,
++                        "duration": run.duration,
+                         "data": midi_b64,
+                         "quantized_midi": base64.b64encode(quantized_midi).decode(
+                             "ascii"
+@@ -350,6 +503,7 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                 )
+                 yield f"data: {payload}\n\n"
+             finally:
++                if "stream" in locals(): stream.close()
+                 release_lock()
+ 
+         return StreamingResponse(
+@@ -376,15 +530,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+         """
+         data = await file.read()
+         try:
+-            wav, sr = _read_wav_file(io.BytesIO(data))
+-        except (wave.Error, EOFError):
+-            try:
+-                wav, sr = _read_non_wav_file(io.BytesIO(data))
+-            except Exception as e:
+-                raise HTTPException(
+-                    status_code=400,
+-                    detail=f"could not decode audio file '{file.filename}': {e}",
+-                ) from e
++            wav, sr = read_audio(io.BytesIO(data))
++        except Exception as e:
++            raise HTTPException(
++                status_code=400,
++                detail=f"Could not read audio file '{file.filename}': {e}",
++            ) from e
+ 
+         duration_s = wav.shape[-1] / sr
+         if duration_s > _MAX_TRANSCRIBE_MIDI_DURATION_S:
+@@ -454,42 +605,28 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+             )
+ 
+         midi_data = await midi.read()
+-        tmp_paths: list[str] = []
+-
+-        with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp_midi:
+-            tmp_midi.write(midi_data)
+-            midi_tmp = tmp_midi.name
+-            tmp_paths.append(midi_tmp)
+-
+-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
+-            out_tmp = tmp_out.name
+-            tmp_paths.append(out_tmp)
++        audio_data = await audio.read() if mode == "mix" and audio is not None else None
++        suffix = Path(audio.filename or "audio.wav").suffix.lower() if audio is not None else ".wav"
++
++        def render():
++            # The rendering thread owns its files through completion, even if
++            # the HTTP request disconnects. Other routes remain responsive.
++            with tempfile.TemporaryDirectory(prefix="muscriptor-render-") as directory:
++                folder = Path(directory)
++                midi_tmp, out_tmp = folder / "transcription.mid", folder / "result.wav"
++                midi_tmp.write_bytes(midi_data)
++                if mode == "synth":
++                    synthesize(midi_path=str(midi_tmp), output_path=str(out_tmp))
++                else:
++                    audio_tmp = folder / ("original" + (suffix or ".wav"))
++                    audio_tmp.write_bytes(audio_data)
++                    do_auralize(midi_path=str(midi_tmp), original_audio_path=str(audio_tmp), output_path=str(out_tmp))
++                return out_tmp.read_bytes()
+ 
+         try:
+-            if mode == "synth":
+-                synthesize(midi_path=midi_tmp, output_path=out_tmp)
+-            else:
+-                audio_data = await audio.read()
+-                suffix = Path(audio.filename or "audio.wav").suffix.lower() or ".wav"
+-                with tempfile.NamedTemporaryFile(
+-                    suffix=suffix, delete=False
+-                ) as tmp_audio:
+-                    tmp_audio.write(audio_data)
+-                    tmp_paths.append(tmp_audio.name)
+-                do_auralize(
+-                    midi_path=midi_tmp,
+-                    original_audio_path=tmp_audio.name,
+-                    output_path=out_tmp,
+-                )
+-            with open(out_tmp, "rb") as f:
+-                wav_bytes = f.read()
++            wav_bytes = await asyncio.to_thread(render)
+         except Exception as e:
+-            raise HTTPException(status_code=500, detail=str(e))
+-        finally:
+-            for p in tmp_paths:
+-                if os.path.exists(p):
+-                    os.unlink(p)
+-
++            raise HTTPException(status_code=500, detail=str(e)) from e
+         return Response(content=wav_bytes, media_type="audio/wav")
+ 
+     @app.post("/sheets")
+diff --git a/muscriptor/utils/audio.py b/muscriptor/utils/audio.py
+index 18037eb..855f062 100644
+--- a/muscriptor/utils/audio.py
++++ b/muscriptor/utils/audio.py
+@@ -30,6 +30,9 @@ def _read_wav_file(source) -> tuple[torch.Tensor, int]:
+         n_frames = wf.getnframes()
+         raw = wf.readframes(n_frames)
+ 
++    if len(raw) != n_frames * n_channels * sampwidth:
++        raise ValueError('Audio WAV data is truncated or has incomplete frames.')
++
+     if sampwidth == 1:
+         data = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+         data = (data - 128.0) / 128.0
+@@ -78,6 +81,21 @@ def _read_non_wav_file(source: str | Path | IO[bytes]) -> tuple[torch.Tensor, in
+     return wav, sample_rate
+ 
+ 
++def read_audio(source) -> tuple[torch.Tensor, int]:
++    """Decode and validate one source before it reaches resampling/inference."""
++    try:
++        wav, sr = _read_wav_file(source)
++    except (wave.Error, EOFError):
++        if hasattr(source, 'seek'):
++            source.seek(0)
++        wav, sr = _read_non_wav_file(source)
++    if sr <= 0 or wav.ndim != 2 or not wav.shape[0] or not wav.shape[1]:
++        raise ValueError('Audio file contains no readable samples.')
++    if not torch.isfinite(wav).all():
++        raise ValueError('Audio file contains invalid sample values. Re-export the recording and try again.')
++    return wav, sr
++
++
+ def resample(
+     waveform: torch.Tensor,
+     orig_freq: int,
+@@ -101,12 +119,11 @@ def load_audio(path: str | Path, target_sr: int = 16000) -> torch.Tensor:
+         Tensor of shape [1, T] at target_sr.
+     """
+     filepath = Path(path)
+-    try:
+-        wav, sr = _read_wav_file(str(filepath))
+-    except (wave.Error, EOFError):
+-        wav, sr = _read_non_wav_file(str(filepath))
++    wav, sr = read_audio(str(filepath))
+     if wav.shape[0] > 1:
+         wav = wav.mean(dim=0, keepdim=True)
+     if sr != target_sr:
+         wav = resample(wav, sr, target_sr)
++    if not torch.isfinite(wav).all():
++        raise ValueError('Audio sample values are too large to process. Re-export the recording and try again.')
+     return wav
+diff --git a/muscriptor/utils/sheets.py b/muscriptor/utils/sheets.py
+index 4aa0925..f70b0bb 100644
+--- a/muscriptor/utils/sheets.py
++++ b/muscriptor/utils/sheets.py
+@@ -122,7 +122,12 @@ def _candidates() -> list[str]:
+         path = shutil.which(name)
+         if path:
+             found.append(path)
+-    for location in _APP_LOCATIONS:
++    locations = list(_APP_LOCATIONS)
++    if os.name == "nt":
++        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
++            if base:
++                locations.extend(str(Path(base) / sub / "bin/MuseScore4.exe") for sub in ("MuseScore 4", "Programs/MuseScore 4"))
++    for location in locations:
+         path = Path(location).expanduser()
+         if path.is_file():
+             found.append(str(path))
+diff --git a/web/index.html b/web/index.html
+index a214a33..62779a1 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -3,10 +3,10 @@
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>MuScriptor: Music to MIDI and Sheet Music</title>
++    <title>MuScriptor — Pokestir’s Adaptation</title>
+     <meta
+       name="description"
+-      content="Free, open-source music transcription. Upload an mp3/wav/... and MuScriptor turns every instrument into MIDI, sheet music PDFs and guitar tabs you can download."
++      content="Pokestir’s independent local adaptation of MuScriptor, with tempo and time-signature controls, separate quantization, and MIDI and sheet-music export. Audio processing stays on your computer."
+     />
+     <link rel="icon" type="image/svg+xml" href="/muscriptor-mark-v4.svg" />
+     <link rel="preconnect" href="https://fonts.googleapis.com" />
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index c3a61b9..94bea66 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -1,3 +1,4 @@
++import { readRecovery, hasSavedRecovery, type SavedSession } from "./sessionStorage";
+ import { useEffect, useRef, useState } from "react";
+ import clsx from "clsx";
+ import type { PianoRoll } from "./pianoroll";
+@@ -7,13 +8,16 @@ import {
+   type AppState,
+   type TranscriptionResult,
+ } from "./hooks/useTranscription";
++import { AppInfoDialog } from "./components/AppInfoDialog";
++import { RhythmPanel, defaultTiming } from "./components/RhythmPanel";
++import type { RhythmResult } from "./hooks/useTranscription";
+ import { Controls } from "./components/Controls";
+ import { OutputBar } from "./components/OutputBar";
+ import { FeedbackLine } from "./components/FeedbackLine";
+ import { PianoRollCanvas } from "./components/PianoRollCanvas";
+ import { InstrumentList } from "./components/InstrumentList";
+ import { DropOverlay } from "./components/DropOverlay";
+-import { Footer, PartnerLogos } from "./components/Footer";
++import { Footer } from "./components/Footer";
+ import { WelcomeScreen } from "./components/WelcomeScreen";
+ import { ConsentBanner } from "./components/ConsentBanner";
+ import { Faq } from "./components/Faq";
+@@ -71,6 +75,19 @@ export function App() {
+   const progressFillRef = useRef<HTMLDivElement | null>(null);
+   const progressLabelRef = useRef<HTMLSpanElement | null>(null);
+ 
++  const sessionInputRef = useRef<HTMLInputElement | null>(null);
++  const sessionMenuRef = useRef<HTMLDetailsElement | null>(null);
++  const [showAppInfo, setShowAppInfo] = useState(false);
++  const [sessionSaved, setSessionSaved] = useState(true);
++  const [hasRecovery, setHasRecovery] = useState(false);
++  const [sessionNotice, setSessionNotice] = useState("");
++  const [timing, setTiming] = useState(defaultTiming);
++  const [rhythmResult, setRhythmResult] = useState<RhythmResult | null>(null);
++  const [timingBusy, setTimingBusy] = useState(false);
++  const [timingError, setTimingError] = useState("");
++  const [appliedTiming, setAppliedTiming] = useState("");
++  const [click, setClick] = useState(false);
++  const timingRef = useRef(timing); timingRef.current = timing;
+   const [screen, setScreen] = useState<Screen>("welcome");
+   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+   const [appState, setAppState] = useState<AppState>("idle");
+@@ -100,10 +117,23 @@ export function App() {
+   const appStateRef = useRef(appState);
+   appStateRef.current = appState;
+ 
+-  const { transcribe, abort } = useTranscription({
++  const { transcribe, abort, reexport, saveSession, openSession, finishHere, finishState } = useTranscription({
+     audio,
+     rollRef,
+     getConditioning: () => Array.from(condRef.current),
++    getTiming: () => timingRef.current,
++    onRecovery: message => { if (!message) setHasRecovery(true); setSessionNotice(message ?? "Recovery saved locally. Save Session to keep a portable copy."); },
++    onSessionTiming: t => {
++      const normalized = {...defaultTiming, ...t} as typeof defaultTiming;
++      for (const key of ["bpm", "first_downbeat", "subdivision"] as const) normalized[key] = String(normalized[key]);
++      normalized.factor = Number(normalized.factor);
++      if (Array.isArray(t.anchors)) normalized.anchors = t.anchors.map(a => (a as number[]).join(', ')).join('\n');
++      timingRef.current = normalized; setTiming(normalized);
++    },
++    onRhythm: r => {
++      setSessionSaved(false);
++      setRhythmResult(r); setAppliedTiming(JSON.stringify(timingRef.current));
++    },
+     progress,
+     // A failed transcription bounces back to the welcome screen with a message.
+     onError: (message) => {
+@@ -125,6 +155,44 @@ export function App() {
+     setCurrentFile,
+     setUserScrolled,
+   });
++  useEffect(() => {
++    const dismiss = (event: PointerEvent) => {
++      const menu = sessionMenuRef.current;
++      if (menu && !menu.contains(event.target as Node)) menu.open = false;
++    };
++    const escape = (event: KeyboardEvent) => {
++      const menu = sessionMenuRef.current;
++      if (event.key === "Escape" && menu?.open) {
++        menu.open = false;
++        menu.querySelector("summary")?.focus();
++      }
++    };
++    document.addEventListener("pointerdown", dismiss);
++    document.addEventListener("keydown", escape);
++    return () => {
++      document.removeEventListener("pointerdown", dismiss);
++      document.removeEventListener("keydown", escape);
++    };
++  }, []);
++  useEffect(() => { hasSavedRecovery().then(setHasRecovery).catch(() => {}); }, []);
++  useEffect(() => {
++    const warn = (e: BeforeUnloadEvent) => {
++      if (appState === 'transcribing' || submit.phase !== 'idle' || (result && (!sessionSaved || JSON.stringify(timing) !== appliedTiming))) {
++        e.preventDefault(); e.returnValue = '';
++      }
++    };
++    window.addEventListener('beforeunload',warn);
++    return () => window.removeEventListener('beforeunload',warn);
++  },[appState,submit,result,sessionSaved,timing,appliedTiming]);
++
++  async function loadProject(project: SavedSession) {
++    if (result && !window.confirm('Replace this transcription with the saved session?')) return;
++    setTimingBusy(true); setTimingError('');
++    try { await openSession(project); }
++    catch (e) { setTimingError(String(e)); }
++    finally { setTimingBusy(false); }
++  }
++
+   // Submit the file picked on the welcome screen. The view only switches once
+   // the server has accepted the request (`onAccepted` above); until then the
+   // button reports progress — including waiting out a busy server. Called from
+@@ -173,6 +241,7 @@ export function App() {
+     rollRef.current?.clear();
+     setInstruments([]);
+     setResult(null);
++    setRhythmResult(null); setTimingError("");
+     setUserScrolled(false);
+     setAppState("idle");
+     setSubmit({ phase: "idle" });
+@@ -343,13 +412,11 @@ export function App() {
+ 
+   return (
+     <>
+-      <div className="grain" aria-hidden="true" />
+-
+-      <header className="mx-auto flex max-w-7xl flex-wrap items-end justify-between gap-6 px-7 py-4 animate-rise">
++      <header className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-6 px-7 py-4">
+         {/* Brand: the v2 mark (transparent PNG) + the wordmark as real text. */}
+         <div
+           className={clsx(
+-            "flex items-center gap-3 sm:gap-5",
++            "flex min-w-0 items-center gap-3 sm:gap-5",
+             screen === "transcribe" && "cursor-pointer",
+           )}
+           onClick={screen === "transcribe" ? transcribeAnother : undefined}
+@@ -370,22 +437,62 @@ export function App() {
+           <img
+             src="/muscriptor-logo-v4.svg"
+             alt="MuScriptor logo"
+-            className="block h-[clamp(72px,10vw,110px)] w-auto"
++            className="block h-[clamp(48px,8vw,80px)] w-auto shrink-0"
+             draggable={false}
+           />
+-          <div className="flex flex-col gap-1">
+-            <span className="text-[clamp(2.3rem,6vw,3rem)] font-bold leading-none text-white">MuScriptor</span>
++          <div className="flex min-w-0 flex-col gap-1">
++            <span className="flex flex-wrap items-center gap-x-3 gap-y-2">
++              <span className="text-[clamp(1.6rem,6vw,3rem)] font-bold leading-none text-white">MuScriptor</span>
++            </span>
+             <span className="text-sm text-muted">
+-              Music to MIDI and sheet music
++              Independent adaptation by Pokestir
+             </span>
+           </div>
+         </div>
+ 
+-        {/* Also in the footer; here it's decoration, so it goes away on narrow
+-            screens rather than wrapping under the wordmark. */}
+-        <PartnerLogos className="self-center max-sm:hidden" />
++        <details ref={sessionMenuRef} className="session-menu">
++          <summary aria-label="Sessions and app options" title="Sessions and app options">
++            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
++              <path d="m9 3-.5 2-2 .9-1.8-.6-2 3.4 1.5 1.5v2.3L2.7 14l2 3.4 2-.5 1.9 1 .4 2.1h4l.5-2.1 1.9-1 2 .5 2-3.4-1.5-1.5v-2.3l1.5-1.5-2-3.4-1.9.6-2-.9L13 3Z" />
++              <circle cx="11" cy="11.5" r="3" />
++            </svg>
++          </summary>
++          <div className="session-menu-panel" role="group" aria-label="Session actions" onClick={event => {
++            if ((event.target as HTMLElement).closest('button') && sessionMenuRef.current) sessionMenuRef.current.open = false;
++          }}>
++        <button disabled={timingBusy || appState === 'transcribing' || submit.phase !== 'idle'} onClick={() => sessionInputRef.current?.click()}>Open Session…</button>
++        {hasRecovery && <button disabled={timingBusy || appState === 'transcribing' || submit.phase !== 'idle'} onClick={async () => {
++          try {const p=await readRecovery(); if(p) await loadProject(p);} catch {setTimingError('Recovery could not be opened.');}
++        }}>Recover Last Session</button>}
++        {result && <button disabled={timingBusy} onClick={async () => {
++          setTimingBusy(true);
++          try {await saveSession(); setSessionSaved(true); setSessionNotice('Session downloaded, including audio.');}
++          catch(e) {setTimingError(String(e));} finally {setTimingBusy(false);}
++        }}>Save Session…</button>}
++            <hr />
++            <button onClick={() => setShowAppInfo(true)}>App Information…</button>
++          </div>
++        </details>
+       </header>
++      <AppInfoDialog open={showAppInfo} onClose={() => { setShowAppInfo(false); sessionMenuRef.current?.querySelector("summary")?.focus(); }} />
+ 
++      <div className={clsx("mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-7 pb-3 text-xs text-muted", !sessionNotice && !timingError && appState !== 'transcribing' && "hidden")}>
++        <input ref={sessionInputRef} type="file" accept=".muscriptor" hidden onChange={async e => {
++          const file=e.target.files?.[0]; e.target.value=''; if (!file) return;
++          if(file.size>256*1024*1024) {setTimingError('Session exceeds 256 MB.');return;}
++          try {await loadProject(JSON.parse(await file.text()));} catch {setTimingError('This session could not be read.');}
++        }}/>
++        {appState === 'transcribing' && (finishState.ready || finishState.pending) && <>
++          <button disabled={finishState.pending} onClick={() => void finishHere()} title="Saves fully completed 5-second sections. The unfinished section is omitted.">
++            {finishState.pending ? "Finishing…" : "Finish here & download MIDI"}
++          </button>
++          <span role="status">{finishState.pending ? "Saving completed sections…" : `${finishState.seconds.toFixed(0)} seconds completed. The unfinished section will be omitted.`}</span>
++        </>}
++        {appState === 'transcribing' && finishState.error && <span role="alert">{finishState.error}</span>}
++        {appState === 'transcribing' && <button onClick={() => {resetToWelcome();setSessionNotice('Transcription cancelled. Your file and settings were kept.');}}>Cancel transcription</button>}
++        {sessionNotice && <span role="status">{sessionNotice}</span>}
++        {timingError && <span role="alert">{timingError}</span>}
++      </div>
+       {screen === "welcome" ? (
+         <>
+           <WelcomeScreen
+@@ -400,6 +507,7 @@ export function App() {
+             dragging={dragging}
+             error={error}
+             setError={setError}
++            rhythmControls={<RhythmPanel value={timing} onChange={setTiming} busy={submit.phase !== "idle"} click={click} onClickChange={setClick} />}
+           />
+           <Faq />
+         </>
+@@ -443,11 +551,17 @@ export function App() {
+ 
+           {/* Below the roll: the transcription job itself — progress, export,
+               and starting over. */}
++          <RhythmPanel value={timing} onChange={setTiming} busy={appState === "transcribing" || timingBusy}
++            summary={rhythmResult?.summary} error={timingError} warnings={rhythmResult?.warnings}
++            dirty={!!result && appliedTiming !== JSON.stringify(timing)}
++            onApply={result ? async () => {setTimingBusy(true); setTimingError(""); try {await reexport();} catch(e) {setTimingError(String(e));} finally {setTimingBusy(false);} } : undefined}
++            click={click} onClickChange={v => {setClick(v); audio.setClickEnabled(v);}} />
++
+           <OutputBar
+             transcribing={appState === "transcribing"}
+             progressFillRef={progressFillRef}
+             progressLabelRef={progressLabelRef}
+-            result={result}
++            result={timingBusy || (!!result && appliedTiming !== JSON.stringify(timing)) ? null : result}
+             currentFile={currentFile}
+             onTranscribeAnother={transcribeAnother}
+           />
+diff --git a/web/src/audio.ts b/web/src/audio.ts
+index 6777bbc..b35d2f2 100644
+--- a/web/src/audio.ts
++++ b/web/src/audio.ts
+@@ -73,6 +73,7 @@ type NoteOpts = {
+ };
+ 
+ export class AudioEngine {
++  private wavGeneration = 0;
+   private ctx!: AudioContext;
+   private synth: WorkletSynthesizer | null = null;
+   /** Notes scheduled while the synth / soundfont was still loading. */
+@@ -159,12 +160,17 @@ export class AudioEngine {
+ 
+   /** Decode `file` and remember the buffer for synced WAV playback. */
+   async loadWav(file: File) {
++    const generation = ++this.wavGeneration;
+     this.stopWavSource();
+     this.wavBuffer = null;
+-    const bytes = await file.arrayBuffer();
+     try {
+-      this.wavBuffer = await this.ctx.decodeAudioData(bytes);
++      const bytes = await file.arrayBuffer();
++      if (generation !== this.wavGeneration) return;
++      const buffer = await this.ctx.decodeAudioData(bytes);
++      if (generation !== this.wavGeneration) return;
++      this.wavBuffer = buffer;
+     } catch {
++      if (generation !== this.wavGeneration) return;
+       // Non-decodable input — keep MIDI-only playback.
+       this.wavBuffer = null;
+     }
+@@ -172,6 +178,33 @@ export class AudioEngine {
+     this.applyMix();
+   }
+ 
++  /** Keep the source audio/session aligned with a finished transcription prefix. */
++  prefixFile(seconds: number, name: string): File | null {
++    const source = this.wavBuffer;
++    if (!source) return null;
++    const frames = Math.min(source.length, Math.max(1, Math.round(seconds * source.sampleRate)));
++    const channels = source.numberOfChannels;
++    const prefix = this.ctx.createBuffer(channels, frames, source.sampleRate);
++    const bytes = new ArrayBuffer(44 + frames * channels * 2);
++    const view = new DataView(bytes);
++    const text = (offset: number, value: string) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
++    text(0, "RIFF"); view.setUint32(4, bytes.byteLength - 8, true); text(8, "WAVE");
++    text(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
++    view.setUint16(22, channels, true); view.setUint32(24, source.sampleRate, true);
++    view.setUint32(28, source.sampleRate * channels * 2, true); view.setUint16(32, channels * 2, true);
++    view.setUint16(34, 16, true); text(36, "data"); view.setUint32(40, bytes.byteLength - 44, true);
++    for (let channel = 0; channel < channels; channel++) {
++      const samples = source.getChannelData(channel).subarray(0, frames);
++      prefix.copyToChannel(samples, channel);
++      for (let frame = 0; frame < frames; frame++) {
++        const value = Math.max(-1, Math.min(1, samples[frame]));
++        view.setInt16(44 + (frame * channels + channel) * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true);
++      }
++    }
++    this.stopWavSource(); this.wavBuffer = prefix;
++    return new File([bytes], name.replace(/\.[^/.]+$/, "") + "_partial.wav", {type: "audio/wav"});
++  }
++
+   /** Set the MIDI/WAV crossfade. `midiAmount` in [0, 1]. */
+   setMix(midiAmount: number) {
+     this.mix = Math.max(0, Math.min(1, midiAmount));
+@@ -186,6 +219,15 @@ export class AudioEngine {
+ 
+   private applyMix() {
+     const t = this.ctx.currentTime;
++    if (!this.wavBuffer) {
++      // Audio-less sessions must remain audible even if the previous session
++      // was set to Original-only or stereo comparison.
++      this.wavGain.gain.setTargetAtTime(0, t, 0.01);
++      this.midiGain.gain.setTargetAtTime(1, t, 0.01);
++      this.wavPanner.pan.setTargetAtTime(0, t, 0.01);
++      this.midiPanner.pan.setTargetAtTime(0, t, 0.01);
++      return;
++    }
+     if (this.stereo) {
+       // Panned hard to opposite channels. Hard-panning a stereo signal sums
+       // its L+R into one channel (up to +6 dB), so halve the gain of stereo
+@@ -316,6 +358,33 @@ export class AudioEngine {
+    * take out the lag the transcribed onsets carry against the detected beats,
+    * once the beat grid arrives at the end of the stream.
+    */
++  private rhythmDuration: number | null = null;
++  private rhythmClicks: {time: number; accent: boolean}[] = [];
++  private clickEnabled = false;
++  private clickSynth: Tone.Synth | null = null;
++
++  setClickEnabled(enabled: boolean) {
++    this.clickEnabled = enabled;
++    if (enabled && !this.clickSynth) this.clickSynth = new Tone.Synth({envelope:{attack:0.001, decay:0.025, sustain:0, release:0.01}, volume:-12}).toDestination();
++    this.seek(this.seconds);
++  }
++
++  private scheduleClicks(from = 0) {
++    if (!this.clickEnabled) return;
++    for (const click of this.rhythmClicks) if (click.time >= from) {
++      Tone.getTransport().scheduleOnce(time => this.clickSynth?.triggerAttackRelease(click.accent ? 1500 : 1000, .025, time), click.time);
++    }
++  }
++
++  replaceNotes(notes: NoteOpts[], duration: number, beats: number[], downbeats: number[]) {
++    this.stop();
++    this.rhythmDuration = duration;
++    this.allNotes = []; this.pendingNotes = [];
++    this.rhythmClicks = [...new Set([...beats, ...downbeats])].sort((a,b) => a-b).map(time => ({time, accent:downbeats.some(d => Math.abs(d-time)<.02)}));
++    for (const note of notes) this.scheduleNote({...note});
++    this.scheduleStop(duration + .3);
++  }
++
+   shiftNotes(seconds: number) {
+     if (!seconds) return;
+     for (const n of [...this.allNotes, ...this.pendingNotes]) {
+@@ -335,7 +404,7 @@ export class AudioEngine {
+     const synth = this.synth;
+     const channel = this.channelFor(opts.instrument);
+     this.warmNote(opts.instrument, opts.pitch);
+-    const duration = Math.max(0.05, opts.end - opts.start);
++    const duration = Math.max(0.001, opts.end - opts.start);
+     // The callback fires slightly ahead of the audio time; passing `time`
+     // through lets the worklet apply both events sample-accurately. Pairing
+     // the noteOff with its noteOn also guarantees no stuck notes.
+@@ -358,6 +427,7 @@ export class AudioEngine {
+     if (t.seconds < 0.001) {
+       t.cancel();
+       for (const n of this.allNotes) this.scheduleNoteRaw(n);
++      this.scheduleClicks();
+       if (this.autoStopAt !== null) this.scheduleStopRaw(this.autoStopAt);
+     }
+     t.start();
+@@ -379,6 +449,7 @@ export class AudioEngine {
+     // a full re-schedule of everything that starts after the new position.
+     t.cancel();
+     t.seconds = target;
++    this.scheduleClicks(target);
+     for (const n of this.allNotes) {
+       if (n.start >= target) this.scheduleNoteRaw(n);
+     }
+@@ -407,13 +478,17 @@ export class AudioEngine {
+ 
+   /** Wipe scheduled state for a brand-new transcription. */
+   reset() {
++    ++this.wavGeneration;
+     this.stop();
+     this.allNotes = [];
+     this.pendingNotes = [];
+     this.autoStopAt = null;
++    this.rhythmDuration = null;
++    this.rhythmClicks = [];
+     this.stopWavSource();
+     this.wavBuffer = null;
+     // The instrument list is rebuilt from scratch, so unmute everything.
++    this.applyMix();
+     this.mutedInstruments.clear();
+     for (const ch of this.channels.values()) {
+       this.synth?.midiChannels[ch]?.setSystemParameter("isMuted", false);
+@@ -439,9 +514,11 @@ export class AudioEngine {
+     return Tone.getTransport().seconds;
+   }
+ 
++  get hasOriginal(): boolean { return this.wavBuffer !== null; }
++
+   /** Duration of the decoded source audio in seconds, or 0 if not yet loaded. */
+   get duration(): number {
+-    return this.wavBuffer?.duration ?? 0;
++    return this.rhythmDuration ?? this.wavBuffer?.duration ?? 0;
+   }
+ 
+   get state(): "started" | "stopped" | "paused" {
+diff --git a/web/src/components/Controls.tsx b/web/src/components/Controls.tsx
+index 0040808..0394407 100644
+--- a/web/src/components/Controls.tsx
++++ b/web/src/components/Controls.tsx
+@@ -21,10 +21,12 @@ export function Controls(props: {
+   // The transport's state isn't React state (and it can auto-stop at the end),
+   // so poll it each frame to keep the toggle button's label in sync.
+   const [playing, setPlaying] = useState(false);
++  const [hasOriginal, setHasOriginal] = useState(audio.hasOriginal);
+   useEffect(() => {
+     let raf = 0;
+     const tick = () => {
+       setPlaying(audio.state === "started");
++      setHasOriginal(audio.hasOriginal);
+       raf = requestAnimationFrame(tick);
+     };
+     raf = requestAnimationFrame(tick);
+@@ -63,7 +65,7 @@ export function Controls(props: {
+       >
+         0.0s
+       </span>
+-      <label
++      {hasOriginal ? <><label
+         className={clsx(
+           "ml-auto inline-flex items-center gap-2.5 text-sm text-muted max-[760px]:ml-0",
+           stereo && "opacity-40",
+@@ -118,7 +120,7 @@ export function Controls(props: {
+           onClick={(e) => e.currentTarget.blur()}
+         />
+         <span>Stereo</span>
+-      </label>
++      </label></> : <span className="ml-auto text-sm text-muted">MIDI playback · no original audio</span>}
+     </div>
+   );
+ }
+diff --git a/web/src/components/Faq.tsx b/web/src/components/Faq.tsx
+index 3d667a6..48f8ea6 100644
+--- a/web/src/components/Faq.tsx
++++ b/web/src/components/Faq.tsx
+@@ -16,12 +16,16 @@ import { track } from "../analytics";
+  *  from the same text (see `renderAnswer` / `plainText`). */
+ const QA: { q: string; a: string }[] = [
+   {
+-    q: "What is MuScriptor?",
+-    a: "MuScriptor turns music into MIDI and sheet music: you give it a recording and it transcribes the notes played by every instrument. It was developed by [Kyutai](https://kyutai.org/) and [Mirelo](https://mirelo.ai/).",
++    q: "What is MuScriptor Local?",
++    a: "This is [Pokestir’s independent local adaptation](https://github.com/PokestirVGM/MuScriptor-Local) of MuScriptor, with desktop setup and extra timing controls. The original transcription model and web interface were developed by [Kyutai](https://kyutai.org/) and [Mirelo](https://mirelo.ai/).",
++  },
++  {
++    q: "What does this adaptation add?",
++    a: "Auto or manual tempo, time-signature controls, separate optional quantization, a click preview, and timing edits without running transcription again. Advanced controls include beat anchors and meter changes. Changing BPM or meter preserves playback speed; quantization intentionally moves individual notes. The desktop app manages setup, model downloads, and the local web GUI.",
+   },
+   {
+     q: "Is it free to use?",
+-    a: "Yes. This demo is free, the code is MIT-licensed, and the model weights are published on HuggingFace under CC BY-NC 4.0 (non-commercial use). If you want to run it locally, check out our [GitHub repo](https://github.com/muscriptor/muscriptor).",
++    a: "MuScriptor Local is free to download and its code is MIT-licensed. Model weights have separate terms, shown in the desktop app before download. See the [local project](https://github.com/PokestirVGM/MuScriptor-Local) for installation and license details.",
+   },
+   {
+     q: "What audio formats can I upload?",
+@@ -40,16 +44,16 @@ const QA: { q: string; a: string }[] = [
+     a: "Yes. Fretted instruments like guitar and bass also yield a tablature PDF, next to the standard notation. Download it from the sheet music menu after transcribing. It does not write chord symbols, only the notes that are actually played.",
+   },
+   {
+-    q: "Can I run it locally or use it from Python?",
+-    a: "Yes. `uvx muscriptor serve` runs this same web UI on your machine, `uvx muscriptor transcribe song.mp3` does it from the command line, and the Python API is a couple of lines. It runs on NVIDIA GPUs, on Apple Silicon via Metal, and on CPU with the small model. [Setup instructions are on GitHub](https://github.com/muscriptor/muscriptor).",
++    q: "Do I need an internet connection?",
++    a: "Setup and model downloads need an internet connection. Cached models transcribe locally offline. Browser playback and automatic beat detection may download their sound or beat helpers on first use. Open this adapted interface with Open Web GUI in the desktop app and keep the app open while using it.",
+   },
+   {
+     q: "How accurate is it?",
+-    a: "It's the strongest open transcription model we know of, but it is not perfect. Expect a very good starting point that you clean up in a DAW. MuScriptor tends to work better on acoustic and guitar music than electronic music. If you'd like a more exact benchmark, [check out the paper](https://arxiv.org/abs/2607.08168).",
++    a: "Transcription, beat detection, and automatic meter can make mistakes. Review the notes and click preview, especially for dense recordings or changing rhythms. Timing controls help refine the result but do not guarantee accuracy. For the original model’s evaluation, see the [MuScriptor paper](https://arxiv.org/abs/2607.08168).",
+   },
+   {
+-    q: "What happens to the audio I upload?",
+-    a: "It's transcribed on the server and not kept afterwards. If you'd rather it never leaves your machine, [run MuScriptor locally](https://github.com/muscriptor/muscriptor).",
++    q: "Where is my audio processed?",
++    a: "The browser sends your selected file to the local engine on this computer. Transcription runs here; your audio is not uploaded to a hosted transcription service. The browser keeps the recording available for playback, and the local engine temporarily caches transcription results for timing edits. See the [privacy details](https://github.com/PokestirVGM/MuScriptor-Local/blob/main/PRIVACY.md).",
+   },
+   {
+     q: "How does it work, technically?",
+@@ -57,11 +61,11 @@ const QA: { q: string; a: string }[] = [
+   },
+   {
+     q: "Where can I find the code?",
+-    a: "On GitHub: [github.com/muscriptor/muscriptor](https://github.com/muscriptor/muscriptor). The code is MIT-licensed.",
++    a: "The adapted desktop app and web changes are in [Pokestir’s MuScriptor Local](https://github.com/PokestirVGM/MuScriptor-Local). The original engine and frontend are in [muscriptor/muscriptor](https://github.com/muscriptor/muscriptor).",
+   },
+   {
+     q: "How do I report a bug or send feedback?",
+-    a: "Please [email us](mailto:muscriptor@kyutai.org) or [open an issue on GitHub](https://github.com/muscriptor/muscriptor/issues/new/choose).",
++    a: "For this local adaptation and its extra features, [open an issue on the MuScriptor Local project](https://github.com/PokestirVGM/MuScriptor-Local/issues). Include your platform and steps to reproduce the issue.",
+   },
+ ];
+ 
+diff --git a/web/src/components/FeedbackLine.tsx b/web/src/components/FeedbackLine.tsx
+index 6c4c50e..4b8c5b6 100644
+--- a/web/src/components/FeedbackLine.tsx
++++ b/web/src/components/FeedbackLine.tsx
+@@ -7,12 +7,10 @@ import clsx from "clsx";
+  * who has already settled into watching the progress bar.
+  */
+ const SEGMENTS: { text: string; href?: string }[] = [
+-  { text: "Feedback, question, bug? " },
+-  { text: "Email us", href: "mailto:muscriptor@kyutai.org" },
+-  { text: " or " },
++  { text: "Feedback on MuScriptor Local? " },
+   {
+-    text: "open an issue",
+-    href: "https://github.com/muscriptor/muscriptor/issues/new/choose",
++    text: "Open an issue",
++    href: "https://github.com/PokestirVGM/MuScriptor-Local/issues",
+   },
+ ];
+ 
+diff --git a/web/src/components/Footer.tsx b/web/src/components/Footer.tsx
+index bcce44d..ab2c768 100644
+--- a/web/src/components/Footer.tsx
++++ b/web/src/components/Footer.tsx
+@@ -28,8 +28,10 @@ export function Footer() {
+   return (
+     <footer className="mx-auto mt-4 flex max-w-7xl flex-wrap items-center justify-between gap-6 border-t border-line px-7 py-10 max-[760px]:flex-col max-[760px]:items-start">
+       <p className="max-w-md text-muted">
+-        MuScriptor is a multi-instrument automatic music transcription model:
+-        it turns raw audio into per-instrument MIDI. Built by{" "}
++        <a href="https://github.com/PokestirVGM/MuScriptor-Local" target="_blank" rel="noreferrer"
++          className="text-accent underline underline-offset-4">MuScriptor Local by Pokestir</a>
++        {" "}is an independent adaptation with desktop setup and extra timing features.
++        {" "}Original MuScriptor model and web interface by{" "}
+         <a
+           href="https://kyutai.org/"
+           target="_blank"
+diff --git a/web/src/components/OutputBar.tsx b/web/src/components/OutputBar.tsx
+index 0f2b7c2..c2770f3 100644
+--- a/web/src/components/OutputBar.tsx
++++ b/web/src/components/OutputBar.tsx
+@@ -46,6 +46,16 @@ export function OutputBar(props: {
+     currentFile,
+     onTranscribeAnother,
+   } = props;
++  const [capabilities, setCapabilities] = useState<{sheets:boolean; fluidsynth:boolean; soundfont:boolean; browser_soundfont:boolean} | null>(null);
++  const [checking, setChecking] = useState(false);
++  const [capabilityError, setCapabilityError] = useState('');
++  async function checkCapabilities() {
++    setChecking(true); setCapabilityError('');
++    try {const response=await fetch('/capabilities'); if(!response.ok) throw new Error(); setCapabilities(await response.json());}
++    catch {setCapabilityError('Could not check optional exports. Try again.');}
++    finally {setChecking(false);}
++  }
++  useEffect(() => {void checkCapabilities();}, []);
+   // Label shown on the Download button while a server-side render runs, or null
+   // when idle — the exports below all block the menu while they work.
+   const [busy, setBusy] = useState<string | null>(null);
+@@ -61,7 +71,26 @@ export function OutputBar(props: {
+   } | null>(null);
+   const [sheetsOpen, setSheetsOpen] = useState(false);
+   const menuRef = useRef<HTMLDivElement>(null);
++  const currentResult = useRef(result);
++  currentResult.current = result;
++  const activeExport = useRef<AbortController | null>(null);
+   const ready = result !== null;
++  useEffect(() => {
++    activeExport.current?.abort(); activeExport.current = null;
++    setBusy(null); setSheets(null); setSheetsOpen(false); setMenuOpen(false);
++    return () => { activeExport.current?.abort(); activeExport.current = null; };
++  }, [result]);
++
++  function beginExport(label: string) {
++    if (activeExport.current) return null;
++    const controller = new AbortController();
++    activeExport.current = controller;
++    setBusy(label);
++    return { signal: controller.signal,
++      current: () => activeExport.current === controller && currentResult.current === result && !controller.signal.aborted,
++      finish: () => { if (activeExport.current === controller) { activeExport.current = null; setBusy(null); } },
++    };
++  }
+ 
+   // Dismiss the download menu on outside click / Escape.
+   useEffect(() => {
+@@ -91,38 +120,41 @@ export function OutputBar(props: {
+ 
+   /** The uploaded file's name without its extension, for naming exports. */
+   function stem(): string {
+-    return currentFile?.name.replace(/\.[^.]+$/, "") || "transcription";
++    return (currentFile?.name ?? result?.filename)?.replace(/\.[^.]+$/, "") || "transcription";
+   }
+ 
+   // Renders the transcription server-side with FluidSynth. "synth" downloads
+   // just the synthesized MIDI (mono); "mix" blends it with the original audio
+   // (L = original, R = synthesis) for easy A/B comparison.
+   async function downloadWav(mode: "synth" | "mix") {
+-    if (result === null || currentFile === null) return;
++    if (result === null || (mode === "mix" && currentFile === null)) return;
++    const request = beginExport("Synthesizing…");
++    if (!request) return;
+     track("download", { format: mode === "mix" ? "wav_mix" : "wav_synth" });
+-    setBusy("Synthesizing…");
+     try {
+       const form = new FormData();
+       form.append("mode", mode);
+-      form.append("midi", result.midi, "transcription.mid");
+-      if (mode === "mix") form.append("audio", currentFile);
+-      const resp = await fetch("/auralize", { method: "POST", body: form });
++      form.append("midi", mode === "mix" ? result.performanceMidi ?? result.midi : result.midi, "transcription.mid");
++      if (mode === "mix" && currentFile) form.append("audio", currentFile);
++      const resp = await fetch("/auralize", { method: "POST", body: form, signal: request.signal });
+       if (!resp.ok) throw new Error(await errorDetail(resp));
+       const wavBlob = await resp.blob();
++      if (!request.current()) return;
+       const url = URL.createObjectURL(wavBlob);
+       const a = document.createElement("a");
+       a.href = url;
+       a.download = stem() + (mode === "mix" ? "_mix.wav" : "_transcription.wav");
+       a.click();
+-      URL.revokeObjectURL(url);
++      setTimeout(() => URL.revokeObjectURL(url), 10000);
+     } catch (e) {
++      if (!request.current()) return;
+       track("download_error", {
+         format: mode === "mix" ? "wav_mix" : "wav_synth",
+         message: (e as Error).message,
+       });
+       alert("Couldn't create the audio file: " + (e as Error).message);
+     } finally {
+-      setBusy(null);
++      request.finish();
+     }
+   }
+ 
+@@ -140,7 +172,8 @@ export function OutputBar(props: {
+       setSheetsOpen(true);
+       return;
+     }
+-    setBusy("Generating…");
++    const request = beginExport("Generating…");
++    if (!request) return;
+     try {
+       const form = new FormData();
+       // Engrave the grid-snapped notes when the server managed to snap them:
+@@ -148,12 +181,13 @@ export function OutputBar(props: {
+       const engrave = result.quantizedMidi ?? result.midi;
+       form.append("midi", engrave, "transcription.mid");
+       form.append("quantized", String(result.quantizedMidi !== null));
+-      const resp = await fetch("/sheets", { method: "POST", body: form });
++      const resp = await fetch("/sheets", { method: "POST", body: form, signal: request.signal });
+       if (!resp.ok) throw new Error(await errorDetail(resp));
+       const zipBlob = await resp.blob();
+       // The members are stored, not deflated, so this unpacking is a copy out
+       // of the buffer rather than an inflate of every PDF.
+       const unpacked = unzipSync(new Uint8Array(await zipBlob.arrayBuffer()));
++      if (!request.current()) return;
+       // Object keys keep insertion order for names like these, so the list
+       // comes out in the order the server wrote it: MIDI, MusicXML, full score,
+       // then the parts.
+@@ -167,10 +201,11 @@ export function OutputBar(props: {
+       setSheets({ files, zipBlob, zipFilename: stem() + "_sheets.zip" });
+       setSheetsOpen(true);
+     } catch (e) {
++      if (!request.current()) return;
+       track("download_error", { format: "sheets", message: (e as Error).message });
+       alert("Couldn't engrave the sheet music: " + (e as Error).message);
+     } finally {
+-      setBusy(null);
++      request.finish();
+     }
+   }
+ 
+@@ -246,7 +281,8 @@ export function OutputBar(props: {
+                 pad="px-3 py-2"
+                 role="menuitem"
+                 className={menuItem}
+-                title="Just the transcribed notes, played with a SoundFont (mono)"
++                disabled={!capabilities?.fluidsynth}
++                title="Requires FluidSynth; the SoundFont downloads on first use if needed."
+                 onClick={() => {
+                   setMenuOpen(false);
+                   downloadWav("synth");
+@@ -259,7 +295,8 @@ export function OutputBar(props: {
+                 pad="px-3 py-2"
+                 role="menuitem"
+                 className={menuItem}
+-                title="Original audio (L) + transcribed notes played with a SoundFont (R)"
++                disabled={!capabilities?.fluidsynth || !currentFile}
++                title="Requires FluidSynth and original audio; the SoundFont downloads on first use if needed."
+                 onClick={() => {
+                   setMenuOpen(false);
+                   downloadWav("mix");
+@@ -272,7 +309,8 @@ export function OutputBar(props: {
+                 pad="px-3 py-2"
+                 role="menuitem"
+                 className={menuItem}
+-                title="Engraved notation: PDFs per instrument, tablature, MusicXML"
++                disabled={!capabilities?.sheets}
++                title="Requires MuseScore 4 or newer."
+                 onClick={() => {
+                   setMenuOpen(false);
+                   downloadSheets();
+@@ -293,6 +331,17 @@ export function OutputBar(props: {
+         </Button>
+       </div>
+ 
++      <details className="w-full text-xs text-muted">
++        <summary className="cursor-pointer">Export requirements</summary>
++        <div className="mt-2 grid gap-2">
++          <p>MIDI needs no extra software. Sheet music: {capabilities?.sheets ? 'ready' : 'install MuseScore 4+'}. WAV audio: {capabilities?.fluidsynth ? 'FluidSynth ready' : 'install FluidSynth and add it to PATH'}.</p>
++          {!capabilities?.soundfont && <p>The first WAV export downloads the 215 MB MuseScore General SoundFont. It then works offline.</p>}
++          {!capabilities?.browser_soundfont && <p>Browser note playback needs the 38 MB SoundFont download on first use.</p>}
++          <p><a className="underline" href="https://github.com/PokestirVGM/MuScriptor-Local#tempo-time-signature-and-optional-quantization" target="_blank" rel="noreferrer">Setup instructions</a> · <a className="underline" href="https://musescore.org/en/download" target="_blank" rel="noreferrer">Get MuseScore</a></p>
++          <button disabled={checking} className="text-left underline" onClick={checkCapabilities}>{checking ? 'Checking…' : 'Check again after installation'}</button>
++          {capabilityError && <p role="alert">{capabilityError}</p>}
++        </div>
++      </details>
+       {sheets && sheetsOpen && (
+         <SheetsDialog
+           files={sheets.files}
+diff --git a/web/src/components/SheetsDialog.tsx b/web/src/components/SheetsDialog.tsx
+index 12735fc..731984f 100644
+--- a/web/src/components/SheetsDialog.tsx
++++ b/web/src/components/SheetsDialog.tsx
+@@ -82,8 +82,8 @@ export function SheetsDialog(props: {
+ 
+         {!quantized && (
+           <div className="border-b border-line bg-accent-2/10 px-5 py-3 text-[13px] text-accent-2">
+-            We couldn't find a steady beat in this recording, so the bar lines are guesses.
+-            The score may be hard to read.
++            These notes were exported without quantization. Small timing differences can
++            produce complex notation; review the score before using it.
+           </div>
+         )}
+ 
+diff --git a/web/src/components/WelcomeScreen.tsx b/web/src/components/WelcomeScreen.tsx
+index 59fb8d0..882eebf 100644
+--- a/web/src/components/WelcomeScreen.tsx
++++ b/web/src/components/WelcomeScreen.tsx
+@@ -3,6 +3,7 @@ import {
+   useRef,
+   useState,
+   type Dispatch,
++  type ReactNode,
+   type SetStateAction,
+ } from "react";
+ import clsx from "clsx";
+@@ -10,7 +11,7 @@ import { Button } from "./Button";
+ import { ConditioningPanel } from "./ConditioningPanel";
+ import type { AppError, SubmitState } from "../App";
+ 
+-const SERVER_DOWN = "The muscriptor server is temporarily unavailable.";
++const SERVER_DOWN = "The local engine is unavailable. Open the web GUI again from the MuScriptor Local desktop app.";
+ 
+ /** Whole seconds left until `at` (a `Date.now()` timestamp), or null when
+  *  there's nothing to count down to. Re-renders on a sub-second interval so the
+@@ -31,8 +32,8 @@ function transcribeLabel(submitState: SubmitState, retryIn: number | null): stri
+   if (submitState.phase === "submitting") return "Transcribing…";
+   if (submitState.phase === "busy") {
+     return retryIn === null || retryIn === 0
+-      ? "Servers busy, retrying…"
+-      : `Servers busy, retrying in ${retryIn}s`;
++      ? "Local engine busy, retrying…"
++      : `Local engine busy, retrying in ${retryIn}s`;
+   }
+   return "Transcribe";
+ }
+@@ -44,6 +45,7 @@ function transcribeLabel(submitState: SubmitState, retryIn: number | null): stri
+  */
+ export function WelcomeScreen(props: {
+   selectedFile: File | null;
++  rhythmControls?: ReactNode;
+   onPickFile: (file: File) => void;
+   /** Loads the bundled demo track + its suggested conditioning. */
+   onUseExample: () => Promise<void>;
+@@ -115,10 +117,9 @@ export function WelcomeScreen(props: {
+   return (
+     <main className="mx-auto flex max-w-3xl flex-col gap-4 px-7 pb-12 pt-2 animate-rise [animation-delay:0.06s]">
+       <p className="text-base leading-relaxed text-muted">
+-        MuScriptor is the best open model for multi-instrument transcription to
+-        date. Give it a recording: pop, classical, metal, jazz, whatever, and
+-        it transcribes the notes played by every instrument into MIDI and sheet
+-        music, for you to download or explore interactively.
++        Turn recordings into MIDI and sheet music on your computer. This adapted
++        edition adds tempo and time-signature controls, separate quantization,
++        and timing edits without transcribing again.
+       </p>
+       {/* Explicit extensions alongside the wildcard, needed for iOS Safari
+        * which sometimes grays out perfectly valid audio files otherwise. */}
+@@ -198,6 +199,7 @@ export function WelcomeScreen(props: {
+       {error?.kind !== "server" && selectedFile !== null && (
+         <>
+           <ConditioningPanel selected={condSelected} onChange={onCondChange} />
++          {props.rhythmControls}
+           <div className="flex items-center justify-end gap-5">
+             {submitting && (
+               <Button
+diff --git a/web/src/hooks/useTranscription.ts b/web/src/hooks/useTranscription.ts
+index 34bcacd..b6fcebd 100644
+--- a/web/src/hooks/useTranscription.ts
++++ b/web/src/hooks/useTranscription.ts
+@@ -1,10 +1,13 @@
++import { encodeAudio, saveRecovery, type SavedSession } from "../sessionStorage";
+ import {
+   useRef,
++  useState,
+   type Dispatch,
+   type RefObject,
+   type SetStateAction,
+ } from "react";
+ import { streamTranscribeWithRetry, TranscribeError } from "../sse";
++import type { TimingOptions } from "../components/RhythmPanel";
+ import { track } from "../analytics";
+ import type { AudioEngine } from "../audio";
+ import type { ProgressEstimator } from "../progress";
+@@ -22,8 +25,13 @@ type EndEvent = {
+   end_time: number;
+   start_event_index: number;
+ };
+-type TranscriptionCompleteEvent = {
++export type RhythmResult = {
++  session?: string; summary?: string; warnings?: string[]; notes?: RollNote[];
++  duration?: number; performance_midi?: string;
++};
++type TranscriptionCompleteEvent = RhythmResult & {
+   type: "transcription_complete";
++  partial?: boolean;
+   data: string; // base64-encoded .mid file
+   // The same notes snapped to the beat grid, for engraving; null when there was
+   // no grid to snap them to.
+@@ -32,16 +40,20 @@ type TranscriptionCompleteEvent = {
+ };
+ type ProgressMsg = {
+   type: "progress";
++  can_finish?: boolean;
++  completed_seconds?: number;
+   completed: number; // chunks transcribed so far
+   total: number; // total chunks
+ };
+ type StreamedEvent =
+-  StartEvent | EndEvent | TranscriptionCompleteEvent | ProgressMsg;
++  StartEvent | EndEvent | TranscriptionCompleteEvent | ProgressMsg | {type: "finalizing"};
+ 
+ export type AppState = "idle" | "transcribing" | "done" | "error";
+ 
+ /** Everything a finished transcription hands the UI to export. */
+ export type TranscriptionResult = {
++  performanceMidi?: Blob;
++
+   /** Object URL of `midi`, for the download anchor. Revoked when replaced. */
+   url: string;
+   midi: Blob;
+@@ -74,6 +86,10 @@ export interface TranscriptionDeps {
+   rollRef: RefObject<PianoRoll | null>;
+   /** Conditioning instruments selected in the UI, read at submit time. */
+   getConditioning: () => string[];
++  getTiming: () => TimingOptions;
++  onRhythm: (result: RhythmResult) => void;
++  onRecovery: (message?: string) => void;
++  onSessionTiming: (timing: Record<string, unknown>) => void;
+   /** Smooths chunk-completion anchors into a live progress fraction + ETA. */
+   progress: ProgressEstimator;
+   /** Called when a (non-superseded) transcription fails, so the UI can recover.
+@@ -106,6 +122,10 @@ export function useTranscription(deps: TranscriptionDeps) {
+     audio,
+     rollRef,
+     getConditioning,
++    getTiming,
++    onRhythm,
++    onRecovery,
++    onSessionTiming,
+     progress,
+     onError,
+     onAccepted,
+@@ -117,6 +137,17 @@ export function useTranscription(deps: TranscriptionDeps) {
+     setUserScrolled,
+   } = deps;
+ 
++  const [finishState, setFinishState] = useState({ready: false, pending: false, seconds: 0, error: ""});
++  const activeRun = useRef<string | null>(null);
++  const finishPending = useRef(false);
++  const sourceRef = useRef<File | null>(null);
++  const encodedAudioRef = useRef<Promise<string> | null>(null);
++  const sessionRef = useRef<string | null>(null);
++  const operationSequence = useRef(0);
++  const recoverySequence = useRef(0);
++  const recoveryQueue = useRef<Promise<void>>(Promise.resolve());
++  const filenameRef = useRef("transcription.mid");
++
+   // Names already surfaced in the instrument list this run.
+   const knownRef = useRef(new Set<string>());
+   // Provisional notes awaiting their matching `end` event, keyed by start index.
+@@ -159,6 +190,7 @@ export function useTranscription(deps: TranscriptionDeps) {
+     base64: string,
+     quantizedBase64: string | null,
+     filename: string,
++    performanceBase64?: string,
+   ) {
+     const midi = midiBlobOf(base64);
+     if (midiUrlRef.current !== null) URL.revokeObjectURL(midiUrlRef.current);
+@@ -169,6 +201,7 @@ export function useTranscription(deps: TranscriptionDeps) {
+       midi,
+       quantizedMidi: quantizedBase64 ? midiBlobOf(quantizedBase64) : null,
+       filename,
++      performanceMidi: performanceBase64 ? midiBlobOf(performanceBase64) : midi,
+     });
+   }
+ 
+@@ -203,20 +236,130 @@ export function useTranscription(deps: TranscriptionDeps) {
+     }
+   }
+ 
++  function applyRhythm(ev: TranscriptionCompleteEvent) {
++    setMidi(ev.data, ev.quantized_midi, filenameRef.current, ev.performance_midi);
++    sessionRef.current = ev.session ?? null;
++    onRhythm(ev);
++    if (ev.notes) {
++      knownRef.current = new Set(ev.notes.map(note => note.instrument));
++      setInstruments([...knownRef.current]);
++      openNotesRef.current.clear();
++    }
++    void autosave();
++    if (ev.notes) {
++      rollRef.current?.clear();
++      for (const note of ev.notes) rollRef.current?.addNote({...note});
++      rollRef.current?.setBeatGrid(ev.beat_grid);
++      audio.replaceNotes(ev.notes, ev.duration ?? 0, ev.beat_grid?.beats ?? [], ev.beat_grid?.downbeats ?? []);
++    } else {
++      rollRef.current?.setBeatGrid(ev.beat_grid);
++      audio.shiftNotes(-(ev.beat_grid?.onset_delay ?? 0));
++    }
++  }
++
++  async function buildSession(): Promise<SavedSession> {
++    const id = sessionRef.current;
++    if (!id) throw new Error("Open a session or transcribe a recording first.");
++    const file = sourceRef.current;
++    if (file && file.size > 180*1024*1024) throw new Error('Audio is too large for a session. MIDI can still be downloaded.');
++    if (file) encodedAudioRef.current ??= encodeAudio(file);
++    const encodedAudio = encodedAudioRef.current;
++    const response = await fetch('/session/export', {method:'POST', headers:{'Content-Type':'application/json','X-Client-Id':CLIENT_ID},
++      body:JSON.stringify({session:id, timing:getTiming(), name:file?.name ?? filenameRef.current})});
++    const project = await response.json();
++    if (!response.ok) throw new Error(project.detail ?? 'Could not save session.');
++    if (file) {
++      project.audio = await encodedAudio;
++      project.audio_name = file.name;
++    }
++    if (id !== sessionRef.current) throw new Error('The current transcription changed. Save again.');
++    return project;
++  }
++
++  async function autosave() {
++    const sequence = ++recoverySequence.current;
++    const id = sessionRef.current;
++    const current = () => sequence === recoverySequence.current && id === sessionRef.current;
++    try {
++      const project = await buildSession();
++      recoveryQueue.current = recoveryQueue.current.catch(() => {}).then(async () => {
++        if (!current()) return;
++        await saveRecovery(project);
++        if (current()) onRecovery();
++      });
++      await recoveryQueue.current;
++    } catch {
++      if (current()) onRecovery('Automatic recovery could not be saved. Use Save Session or download MIDI before leaving.');
++    }
++  }
++
++  async function saveSession() {
++    const project = await buildSession();
++    const blob = new Blob([JSON.stringify(project)], {type:'application/json'});
++    if (blob.size > 256*1024*1024) throw new Error('Session exceeds 256 MB. Download MIDI instead.');
++    const url = URL.createObjectURL(blob);
++    const a = document.createElement('a'); a.href=url;
++    a.download=filenameRef.current.replace(/\.mid$/i,'')+'.muscriptor'; a.click();
++    setTimeout(() => URL.revokeObjectURL(url),10000);
++  }
++
++  async function openSession(project: SavedSession) {
++    const operation = ++operationSequence.current;
++    const isStale = () => operation !== operationSequence.current;
++    const response = await fetch('/session/import', {method:'POST',headers:{'Content-Type':'application/json','X-Client-Id':CLIENT_ID},body:JSON.stringify(project)});
++    const result = await response.json();
++    if (isStale()) return;
++    if (!response.ok) throw new Error(result.detail ?? 'Could not open this session.');
++    stopRun(); sessionRef.current = null;
++    reset(); clearMidi(); encodedAudioRef.current = null; sourceRef.current = null;
++    onSessionTiming(result.timing);
++    filenameRef.current = result.name.replace(/\.[^.]+$/, '')+'.mid';
++    setCurrentFile(null);
++    onAccepted();
++    // The canvas must mount even when this project has no embedded audio to decode.
++    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
++    if (isStale()) return;
++    if (project.audio) {
++      const bytes = Uint8Array.from(atob(project.audio), c => c.charCodeAt(0));
++      const file = new File([bytes], project.audio_name ?? 'recording.wav');
++      sourceRef.current = file; encodedAudioRef.current = Promise.resolve(project.audio);
++      setCurrentFile(file);
++      await audio.loadWav(file);
++    }
++    if (isStale()) return;
++    applyRhythm(result); setAppState('done');
++  }
++
++  async function reexport() {
++    if (!sessionRef.current) throw new Error("Transcribe a recording first.");
++    const session = sessionRef.current;
++    const resp = await fetch("/rhythm/reexport", {method: "POST", headers: {"Content-Type":"application/json", "X-Client-Id":CLIENT_ID},
++      body: JSON.stringify({session:sessionRef.current, timing:getTiming()})});
++    const result = await resp.json();
++    if (!resp.ok) throw new Error(result.detail ?? "Could not update timing.");
++    if (session === sessionRef.current) applyRhythm(result as TranscriptionCompleteEvent);
++  }
++
+   async function transcribe(file: File) {
++    ++operationSequence.current;
++    stopRun();
+     // Remember the source audio so the mix download can re-upload it.
+-    setCurrentFile(file);
++    setCurrentFile(file); sourceRef.current = file; encodedAudioRef.current = null;
+     // Cancel any previous run before resetting state for this one.
+-    activeRef.current?.abort();
+     const controller = new AbortController();
+     activeRef.current = controller;
++    const runId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${CLIENT_ID}-${Date.now()}`;
++    activeRun.current = runId; finishPending.current = false;
++    setFinishState({ready: false, pending: false, seconds: 0, error: ""});
+     // True once a *newer* transcription has superseded this one.
+     const isStale = () => activeRef.current !== controller;
+ 
++    sessionRef.current = null;
+     reset();
+     clearMidi();
+     progress.reset();
+     const midiFilename = file.name.replace(/\.[^/.]+$/, "") + ".mid";
++    filenameRef.current = midiFilename;
+     setAppState("transcribing");
+     // Resume the AudioContext now, while we still have the user-gesture
+     // activation from the drop / file-pick. Without this, calling play()
+@@ -224,7 +367,7 @@ export function useTranscription(deps: TranscriptionDeps) {
+     audio.unlock().catch(() => {});
+     // Decode the WAV in parallel with the transcription so it's ready by the
+     // time the user hits play.
+-    audio.loadWav(file).catch(() => {});
++    const audioLoading = audio.loadWav(file).catch(() => {});
+     const submittedAt = performance.now();
+     // When the server actually took the job. Stays `submittedAt` unless the
+     // request was queued behind another transcription, so `transcribe_time_s`
+@@ -232,11 +375,12 @@ export function useTranscription(deps: TranscriptionDeps) {
+     let startedAt = submittedAt;
+     let maxEnd = 0;
+     let noteCount = 0;
++    let completed = false;
+     // Kept for the completion event, which fires after the stream has ended.
+     let beatGrid: BeatGrid | null = null;
+     try {
+       const cond = getConditioning();
+-      const extra = cond.length > 0 ? { instruments: cond } : undefined;
++      const extra = { instruments: cond, timing: JSON.stringify(getTiming()), run_id: runId };
+       for await (const raw of streamTranscribeWithRetry("/transcribe", file, {
+         extra,
+         signal: controller.signal,
+@@ -263,16 +407,31 @@ export function useTranscription(deps: TranscriptionDeps) {
+         const ev = raw as StreamedEvent;
+         if (ev.type === "transcription_complete") {
+           // Final event: the assembled MIDI file. Enables the download button.
+-          setMidi(ev.data, ev.quantized_midi, midiFilename);
+-          // Tempo came with it — redraw the time grid as bars instead of seconds,
+-          // and move the notes onto the beats (the MIDI above already has them
+-          // there), in the roll and in the scheduled playback alike.
++          setFinishState(previous => ({...previous, ready: false, pending: false}));
++          if (ev.partial) {
++            filenameRef.current = midiFilename.replace(/\.mid$/, "_partial.mid");
++            await audioLoading;
++            if (isStale()) return;
++            const prefix = audio.prefixFile(ev.duration ?? 0, file.name);
++            sourceRef.current = prefix; encodedAudioRef.current = null; setCurrentFile(prefix);
++            if (!prefix) ev.warnings = [...(ev.warnings ?? []), "Source audio preview could not be decoded; the partial MIDI is still available."];
++          }
++          applyRhythm(ev);
++          completed = true;
++          if (ev.partial && midiUrlRef.current) {
++            const link = document.createElement("a"); link.href = midiUrlRef.current;
++            link.download = filenameRef.current; link.click();
++          }
+           beatGrid = ev.beat_grid ?? null;
+-          rollRef.current?.setBeatGrid(beatGrid);
+-          audio.shiftNotes(-(beatGrid?.onset_delay ?? 0));
++          if (ev.duration) maxEnd = ev.duration;
++          continue;
++        }
++        if (ev.type === "finalizing") {
++          setFinishState(previous => ({...previous, ready: false}));
+           continue;
+         }
+         if (ev.type === "progress") {
++          setFinishState(previous => ({...previous, ready: !!ev.can_finish && !finishPending.current, seconds: ev.completed_seconds ?? 0}));
+           // Coarse chunk anchor — the estimator smooths it into the live bar.
+           progress.onAnchor(ev.completed, ev.total, performance.now());
+           continue;
+@@ -282,6 +441,9 @@ export function useTranscription(deps: TranscriptionDeps) {
+         if (ev.type === "end" && ev.end_time > maxEnd) maxEnd = ev.end_time;
+       }
+       if (isStale()) return;
++      if (!completed) throw new TranscribeError('Transcription stream ended without a result', {
++        userMessage: 'Transcription stopped before the MIDI was ready. Try again, or use Finish here after a section completes.',
++      });
+       // Stop the transport ~0.3 s after the last note ends.
+       if (maxEnd > 0) audio.scheduleStop(maxEnd + 0.3);
+       setAppState("done");
+@@ -313,14 +475,17 @@ export function useTranscription(deps: TranscriptionDeps) {
+       const message =
+         e instanceof TranscribeError && e.userMessage
+           ? e.userMessage
+-          : "The muscriptor server is temporarily unavailable. Please try again later.";
++          : "The local engine is unavailable. Open the web GUI again from the MuScriptor Local desktop app.";
+       track("transcription_error", {
+         status: e instanceof TranscribeError ? e.status : undefined,
+         message: (e instanceof Error ? e.message : String(e)) + ": " + message,
+       });
+       onError(message);
+     } finally {
+-      if (activeRef.current === controller) activeRef.current = null;
++      if (activeRef.current === controller) {
++        activeRef.current = null; activeRun.current = null; finishPending.current = false;
++        setFinishState(previous => ({...previous, ready: false, pending: false}));
++      }
+     }
+   }
+ 
+@@ -328,10 +493,39 @@ export function useTranscription(deps: TranscriptionDeps) {
+    *  Call when the user leaves the transcribe screen, so the stale stream
+    *  stops feeding notes into the audio engine — and so the server hears the
+    *  disconnect while the user is still picking the next file. */
+-  function abort() {
++  function stopRun() {
++    const runId = activeRun.current;
++    if (runId) void fetch('/transcribe/cancel', {method: 'POST', keepalive: true,
++      headers: {'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID},
++      body: JSON.stringify({run_id: runId})}).catch(() => {});
++    activeRun.current = null; finishPending.current = false;
++    setFinishState({ready: false, pending: false, seconds: 0, error: ""});
+     activeRef.current?.abort();
+     activeRef.current = null;
+   }
+ 
+-  return { transcribe, abort };
++  function abort() {
++    ++operationSequence.current;
++    sessionRef.current = null;
++    stopRun();
++  }
++
++  async function finishHere() {
++    const runId = activeRun.current;
++    if (!runId || !finishState.ready || finishPending.current) return;
++    finishPending.current = true;
++    setFinishState(previous => ({...previous, ready: false, pending: true, error: ""}));
++    try {
++      const response = await fetch("/transcribe/finish", {method: "POST",
++        headers: {"Content-Type": "application/json", "X-Client-Id": CLIENT_ID}, body: JSON.stringify({run_id: runId})});
++      if (!response.ok) throw new Error((await response.json()).detail ?? "Could not finish this transcription yet.");
++    } catch (error) {
++      if (activeRun.current !== runId) return;
++      finishPending.current = false;
++      setFinishState(previous => ({...previous, pending: false, ready: true,
++        error: error instanceof Error ? error.message : "Could not reach the engine. Transcription is still running."}));
++    }
++  }
++
++  return { transcribe, abort, reexport, saveSession, openSession, finishHere, finishState };
+ }
+diff --git a/web/src/pianoroll.ts b/web/src/pianoroll.ts
+index 594aecd..9a62bdf 100644
+--- a/web/src/pianoroll.ts
++++ b/web/src/pianoroll.ts
+@@ -22,6 +22,10 @@ export interface RollNote {
+ /** Constant-tempo grid from the backend (`transcription_complete`'s `beat_grid`). */
+ export interface BeatGrid {
+   bpm: number;
++  beats?: number[];
++  downbeats?: number[];
++  unit?: string;
++  meter?: string | null;
+   /** null when the meter is unknown — then only beat lines are drawn. */
+   beats_per_bar: number | null;
+   /** Time of the first detected bar line, in seconds of the original audio. */
+@@ -75,6 +79,17 @@ export function timeGrid(
+     for (let s = Math.max(0, Math.ceil(from)); s <= to; s++) lines.push(s);
+     return { lines, strips };
+   }
++  if (grid.beats) {
++    let previous = -Infinity;
++    for (const t of grid.beats) {
++      if (t >= from && t <= to && (t - previous) * pxPerSec >= MIN_BEAT_PX) { lines.push(t); previous = t; }
++    }
++    const bars = grid.downbeats ?? [];
++    for (let i = 1; i + 1 < bars.length; i += 2) {
++      if (bars[i+1] > from && bars[i] < to) strips.push({from:bars[i], to:bars[i+1]});
++    }
++    return {lines, strips};
++  }
+   const beat = 60 / grid.bpm;
+   // Meter unknown: shade every beat, there's nothing coarser to group them into.
+   let step = (grid.beats_per_bar ?? 1) * beat;
+diff --git a/web/src/style.css b/web/src/style.css
+index d756a9a..5c528cc 100644
+--- a/web/src/style.css
++++ b/web/src/style.css
+@@ -112,16 +112,7 @@
+     font-family: var(--font-sans);
+     min-height: 100vh;
+     color: var(--color-content);
+-    background:
+-      radial-gradient(
+-        900px 500px at 88% -8%,
+-        rgba(255, 91, 122, 0.1),
+-        transparent 60%
+-      ),
+-      /* A very dark grey page base — lifted off the near-black --color-bg
+-         (#0b0c10), which is kept for the dark insets inside the cards. */
+-      #1b1c21;
+-    background-attachment: fixed;
++    background: #1b1c21;
+   }
+ 
+   /* Default button look; specific buttons override via utilities. */
+@@ -267,3 +258,52 @@ body.drag .drop-overlay {
+     transition: none !important;
+   }
+ }
++
++/* Local timing controls: compact defaults, explicit styling for native controls. */
++.rhythm-panel { grid-column: 1 / -1; min-width: 0; padding: 14px 16px; border: 1px solid var(--color-line); border-radius: 12px; background: var(--color-surface); }
++.rhythm-fields { min-width: 0; padding: 0; margin: 0; border: 0; }
++.rhythm-fields:disabled { opacity: .55; }
++.rhythm-main { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(110px, 1fr) auto; gap: 16px; align-items: end; }
++.rhythm-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12px; color: var(--color-muted); }
++.rhythm-panel select, .rhythm-panel input:not([type=checkbox]), .rhythm-panel textarea { width: 100%; min-width: 0; min-height: 34px; padding: 6px 10px; border: 1px solid var(--color-line-strong); border-radius: 7px; background: var(--color-bg); color: var(--color-content); font: inherit; font-size: 13px; color-scheme: dark; }
++.rhythm-panel select { padding-right: 24px; }
++.rhythm-panel :is(select,input,textarea,button):focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
++.rhythm-check { display: inline-flex; gap: 7px; align-items: center; min-height: 34px; font-size: 13px; color: var(--color-content); cursor: pointer; }
++.rhythm-check input { appearance: auto; accent-color: var(--color-accent); width: 15px; height: 15px; margin: 0; flex: 0 0 auto; }
++.rhythm-secondary { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 12px; }
++.rhythm-secondary .rhythm-field { flex: 1 1 110px; max-width: 230px; }
++.rhythm-footer { display: flex; align-items: start; flex-wrap: wrap; gap: 10px 16px; margin-top: 8px; }
++.rhythm-advanced { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--color-muted); }
++.rhythm-advanced summary { cursor: pointer; padding: 8px 0; width: fit-content; }
++.rhythm-advanced[open] { flex-basis: 100%; }
++.rhythm-advanced-content { padding: 8px 0; display: grid; gap: 10px; }
++.rhythm-advanced-content p { margin: 0; line-height: 1.5; font-size: 12px; }
++.rhythm-advanced-content .rhythm-secondary { margin: 0; }
++.rhythm-click { color: var(--color-muted); font-size: 12px; }
++.rhythm-apply { min-height: 32px; padding: 5px 12px; border-radius: 7px; background: var(--color-accent-soft); border: 1px solid var(--color-accent); color: var(--color-content); font-size: 12px; cursor: pointer; }
++.rhythm-result, .rhythm-note, .rhythm-warning { margin: 6px 0 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
++.rhythm-result { color: var(--color-muted); }
++.rhythm-note { color: var(--color-muted); }
++.rhythm-warning { color: #d6b27a; }
++@media(max-width: 380px) { .rhythm-main { gap: 8px; grid-template-columns: 1fr 1fr; } .rhythm-main .rhythm-check { grid-column: 1 / -1; } }
++
++/* Secondary session actions stay in a quiet, keyboard-accessible header menu. */
++.session-menu { position: relative; flex-shrink: 0; }
++.session-menu > summary { list-style: none; display: grid; place-items: center; width: 38px; height: 38px; color: var(--color-muted); border-radius: 7px; cursor: pointer; }
++.session-menu > summary::-webkit-details-marker { display: none; }
++.session-menu > summary:hover, .session-menu[open] > summary { color: var(--color-content); background: var(--color-surface-2); }
++.session-menu > summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
++.session-menu-panel { position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; min-width: 220px; padding: 5px; border: 1px solid var(--color-line-strong); border-radius: 9px; background: var(--color-surface); box-shadow: var(--shadow-pop); }
++.session-menu-panel button { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 10px 12px; border-radius: 5px; }
++.session-menu-panel button:hover { background: var(--color-surface-2); }
++
++.session-menu-panel hr { border: 0; border-top: 1px solid var(--color-line-strong); margin: 5px; }
++.app-info-dialog { width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; margin: auto; padding: 24px; border: 1px solid var(--color-line-strong); border-radius: 12px; background: var(--color-surface); color: var(--color-content); }
++.app-info-dialog::backdrop { background: rgba(0, 0, 0, .5); }
++.app-info-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
++.app-info-heading h2 { font-size: 24px; font-weight: 600; }
++.app-info-dialog p { margin-top: 14px; font-size: 13px; line-height: 1.6; color: var(--color-muted); }
++.app-info-dialog dl { display: grid; gap: 4px; margin-top: 20px; }
++.app-info-dialog dt { margin-top: 10px; font-size: 12px; color: var(--color-muted); }
++.app-info-dialog dd { font-size: 14px; }
++.app-info-path { font-family: var(--font-mono); overflow-wrap: anywhere; user-select: text; }
+diff --git a/muscriptor/utils/capabilities.py b/muscriptor/utils/capabilities.py
+new file mode 100644
+index 0000000..be946fa
+--- /dev/null
++++ b/muscriptor/utils/capabilities.py
+@@ -0,0 +1,29 @@
++"""Readiness checks never install software or download assets."""
++import hashlib
++import shutil
++from pathlib import Path
++
++
++def cached_asset(url):
++    from .download import _CACHE_DIR
++    if url.startswith('hf://'):
++        from huggingface_hub import try_to_load_from_cache
++        org, repo, filename = url[5:].split('/', 2)
++        return isinstance(try_to_load_from_cache(f'{org}/{repo}', filename), str)
++    name = url.split('/')[-1].split('?')[0]
++    return (_CACHE_DIR / f'{hashlib.sha256(url.encode()).hexdigest()[:8]}_{name}').is_file()
++
++
++def capabilities():
++    from .sheets import find_musescore
++    from .auralization import _LOCAL_SOUNDFONT
++    from ..soundfonts import SF2_URL, SF3_URL
++    try:
++        find_musescore()
++        sheets = True
++    except Exception:
++        sheets = False
++    synth = bool(shutil.which('fluidsynth'))
++    return dict(midi=True, sheets=sheets, fluidsynth=synth,
++                soundfont=_LOCAL_SOUNDFONT.is_file() or cached_asset(SF2_URL),
++                browser_soundfont=cached_asset(SF3_URL))
+diff --git a/muscriptor/utils/partial.py b/muscriptor/utils/partial.py
+new file mode 100644
+index 0000000..45ff69c
+--- /dev/null
++++ b/muscriptor/utils/partial.py
+@@ -0,0 +1,73 @@
++"""Finish a streamed transcription at its last completed audio section."""
++from contextlib import closing, nullcontext
++from muscriptor.events import NoteStartEvent, NoteEndEvent, ProgressEvent
++from muscriptor.transcription_model import _SEGMENT_DURATION
++
++
++class FinishableTranscription:
++    def __init__(self, stream, duration, finish):
++        self.stream = iter(stream)
++        self.original_duration = self.duration = duration
++        self.finish = finish
++        self.events = []
++        self.completed = self.total = 0
++        self.checkpoint = 0
++        self.partial = False
++        self.finished = False
++
++    @property
++    def completed_seconds(self):
++        return min(self.original_duration, self.completed * _SEGMENT_DURATION)
++
++    @property
++    def can_finish(self):
++        return not self.finished and 0 < self.completed < self.total
++
++    def _requested(self):
++        return self.can_finish and self.finish is not None and self.finish.is_set()
++
++    def __iter__(self):
++        # Explicit close unwinds the decoder/GPU generator on every exit path.
++        with closing(self.stream) if hasattr(self.stream, "close") else nullcontext():
++            try:
++                while True:
++                    if self._requested():
++                        self._finish_prefix()
++                        return
++                    try:
++                        event = next(self.stream)
++                    except StopIteration:
++                        return
++                    if self._requested():
++                        self._finish_prefix()
++                        return
++                    if isinstance(event, ProgressEvent):
++                        self.completed, self.total = event.completed, event.total
++                        self.checkpoint = len(self.events)
++                    else:
++                        self.events.append(event)
++                    yield event
++            finally:
++                self.finished = True
++
++    def _finish_prefix(self):
++        self.partial = True
++        self.duration = self.completed_seconds
++        # Drop the in-flight section. Any notes held across the completed
++        # boundary receive a real note-off at that boundary, without moving
++        # their original onsets or leaving hanging MIDI notes.
++        result = []
++        open_notes = {}
++        for event in self.events[:self.checkpoint]:
++            if isinstance(event, NoteStartEvent):
++                if event.start_time < self.duration:
++                    open_notes[event.index] = event
++                    result.append(event)
++            elif event.start_event_index in open_notes:
++                result.append(NoteEndEvent(min(event.end_time, self.duration), open_notes.pop(event.start_event_index)))
++        result.extend(NoteEndEvent(self.duration, note) for note in open_notes.values())
++        self.events = result
++
++    @property
++    def notice(self):
++        return f"Partial transcription: saved the first {self.duration:.1f} seconds. The unfinished section and remaining audio were omitted."
+diff --git a/muscriptor/utils/rhythm.py b/muscriptor/utils/rhythm.py
+new file mode 100644
+index 0000000..bff5a02
+--- /dev/null
++++ b/muscriptor/utils/rhythm.py
+@@ -0,0 +1,711 @@
++"""Local rhythm editing. Source seconds, musical quarters, and export seconds
++are separate coordinates. Detection never quantizes or moves a note.
++"""
++from __future__ import annotations
++
++import base64
++import io
++import logging
++import math
++from collections import deque
++from dataclasses import dataclass, field
++
++import mido
++import numpy as np
++
++
++class RhythmError(ValueError):
++    pass
++
++
++def number(value, name, low, high):
++    if isinstance(value, bool):
++        raise RhythmError(f"{name} must be a number.")
++    try:
++        value = float(value)
++    except (TypeError, ValueError):
++        raise RhythmError(f"Enter {name}.") from None
++    if not math.isfinite(value) or not low <= value <= high:
++        raise RhythmError(f"{name} must be between {low:g} and {high:g}.")
++    return value
++
++
++def signature(value):
++    try:
++        n, d = str(value).split('/')
++        n, d = int(n), int(d)
++    except (ValueError, TypeError):
++        raise RhythmError("Enter a time signature such as 4/4 or 6/8.") from None
++    if not 1 <= n <= 32 or d not in (1, 2, 4, 8, 16, 32):
++        raise RhythmError("Use 1–32 beats and a denominator of 1, 2, 4, 8, 16, or 32.")
++    return n, d
++
++
++def meter_unit(meter):
++    return 1.5 if meter and meter[1] == 8 and meter[0] >= 6 and meter[0] % 3 == 0 else 1.
++
++
++def options(value=None):
++    if value is not None and not isinstance(value, dict):
++        raise RhythmError("Timing settings must be an object.")
++    v = dict(value or {})
++    mode = v.get('mode', 'auto')
++    if mode not in ('auto', 'manual'):
++        raise RhythmError("Choose Auto or Manual tempo.")
++    meter = v.get('meter', 'auto')
++    if meter != 'auto':
++        signature(meter)
++    unit = v.get('unit', 'auto')
++    if unit not in ('auto', 'quarter', 'dotted-quarter', 'eighth'):
++        raise RhythmError("Choose a valid BPM beat unit.")
++    if v.get('stretch', False):
++        raise RhythmError("Changing playback speed is not supported. Manual BPM only defines the grid.")
++    quantize = v.get('quantize', False)
++    if type(quantize) is not bool:
++        raise RhythmError("Quantize must be on or off.")
++    subdivision = str(v.get('subdivision', 'auto'))
++    if subdivision not in ('auto', '2', '4', '3'):
++        raise RhythmError("Choose Auto, eighth notes, sixteenth notes, or triplets.")
++    anchors = v.get('anchors', [])
++    # Text form is shared by compact desktop controls. Each line is seconds, beat.
++    if isinstance(anchors, str):
++        try:
++            anchors = [list(map(float, line.split(','))) for line in anchors.splitlines() if line.strip()]
++        except ValueError:
++            raise RhythmError("Anchors use one ‘seconds, beat number’ pair per line.") from None
++    if not isinstance(anchors, list) or len(anchors) > 256:
++        raise RhythmError("Use at most 256 beat anchors.")
++    parsed = []
++    for anchor in anchors:
++        if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
++            raise RhythmError("Each anchor needs seconds and a beat number (starting at 1).")
++        parsed.append([number(anchor[0], 'Anchor seconds', 0, 86400), number(anchor[1], 'Anchor beat', 1, 1000000)])
++    if len(parsed) == 1 or any(b[0] <= a[0] or b[1] <= a[1] for a, b in zip(parsed, parsed[1:])):
++        raise RhythmError("Use at least two anchors, with increasing seconds and beat numbers.")
++    changes = v.get('meter_changes', '')
++    parsed_changes = []
++    if not isinstance(changes, str):
++        raise RhythmError("Meter changes use ‘bar number, signature’, one per line.")
++    for line in changes.splitlines():
++        if not line.strip():
++            continue
++        try:
++            bar, sig = line.split(',')
++            bar = int(bar.strip())
++        except ValueError:
++            raise RhythmError("Meter changes use ‘bar number, signature’, for example ‘9, 3/4’.") from None
++        n, d = signature(sig.strip())
++        if bar < 2 or bar > 100000 or (parsed_changes and bar <= parsed_changes[-1][0]):
++            raise RhythmError("Meter changes must have increasing bar numbers, starting at bar 2.")
++        parsed_changes.append((bar, n, d))
++    factor = number(v.get('factor', 1), 'Tempo interpretation', 0.5, 2)
++    if factor not in (0.5, 1, 2):
++        raise RhythmError("Choose half, normal, or double tempo.")
++    return dict(mode=mode, meter=meter, unit=unit, quantize=quantize,
++                bpm=number(v.get('bpm', 120), 'BPM', 10, 600),
++                first_downbeat=number(v.get('first_downbeat', 0), 'First downbeat seconds', 0, 86400),
++                subdivision=subdivision, anchors=parsed, meter_changes=parsed_changes, factor=factor)
++
++
++@dataclass
++class Detection:
++    beats: list[float]
++    downbeats: list[float]
++    warning: str = ''
++    pulse_verified: bool = False
++    meter_segments: list = field(default_factory=list)
++
++
++def clean_isolated_beats(beats, downbeats):
++    """Remove only isolated split intervals supported by normal neighbors.
++
++    Never bridge gaps or flatten a sustained tempo change. Kept timestamps
++    remain the detector's timestamps; ambiguous passages remain flagged.
++    """
++    beats = np.asarray(beats, dtype=float)
++    downbeats = np.asarray(downbeats, dtype=float)
++    removed = 0
++    for _ in range(2):
++        keep = np.ones(len(beats), dtype=bool)
++        intervals = np.diff(beats)
++        i = 2
++        while i < len(beats)-2:
++            before, left, right, after = intervals[i-2:i+2]
++            local = float(np.median(intervals[max(0,i-10):min(len(intervals),i+10)]))
++            neighbor_agreement = abs(before-local) < .18*local and abs(after-local) < .18*local
++            split = min(left,right) < .65*local and abs(left+right-local) < .15*local
++            if neighbor_agreement and split:
++                keep[i] = False
++                removed += 1
++                i += 3
++            else:
++                i += 1
++        if keep.all():
++            break
++        beats = beats[keep]
++    if removed:
++        logging.info('Discarded %d isolated extra beat detections', removed)
++        downbeats = np.array([d for d in downbeats if len(beats) and np.min(abs(beats-d)) < .025])
++    return beats, downbeats
++
++
++def audio_pulse_candidate(signal, sr, beats):
++    """Conservative recovery for a clear, continuous bass/percussion pulse.
++
++    This is not a second general-purpose beat tracker. Require nearly every
++    attack interval to have local support, and a run of eight model beats to
++    match one-for-one. Syncopated/sparse/ambiguous attack trains are rejected.
++    Process FFTs in bounded batches, even for long recordings.
++    """
++    hop = max(1, round(sr*.005))
++    size = 2**int(np.ceil(np.log2(sr*.064)))
++    frames = np.lib.stride_tricks.sliding_window_view(
++        np.pad(signal, (size//2, size//2)), size)[::hop]
++    frequencies = np.fft.rfftfreq(size, 1/sr)
++    band = (frequencies >= 35) & (frequencies <= 250)
++    window = np.hanning(size)
++    energy = np.concatenate([
++        abs(np.fft.rfft(frames[i:i+512]*window, axis=1))[:, band].sum(axis=1)
++        for i in range(0, len(frames), 512)])
++    flux = np.maximum(0., np.diff(energy, prepend=energy[0]))
++    peaks = np.flatnonzero((flux[1:-1] > flux[:-2]) & (flux[1:-1] >= flux[2:]))+1
++    # Suppress closely spaced attacks without an O(number_of_peaks**2) scan.
++    blocked = np.zeros(len(flux), dtype=bool)
++    radius = int(np.floor(.100*sr/hop))
++    neighborhood = max(1, round(sr/hop))
++    selected = []
++    for i in peaks[np.argsort(flux[peaks])[::-1]]:
++        if blocked[i]:
++            continue
++        local = flux[max(0, i-neighborhood):i+neighborhood+1]
++        if flux[i] < max(1e-4, .28*float(np.max(local))):
++            continue
++        selected.append(i)
++        blocked[max(0, i-radius):i+radius+1] = True
++    attacks = np.asarray(sorted(selected))*hop/sr
++    if len(attacks) < 16:
++        return None
++    intervals = np.diff(attacks)
++    if np.any(intervals < .2) or np.any(intervals > 1.5):
++        return None
++    supported = [abs(v/np.median(intervals[max(0, i-2):i+3])-1) <= .06
++                 for i, v in enumerate(intervals)]
++    if np.mean(supported) < .98:
++        return None
++    # Cover the model's track, allowing its first/last extrapolated beat to
++    # fall outside the actual attacks. Find a supported pulse run anywhere:
++    # an unreliable introduction must not veto a clear later agreement.
++    if (attacks[0] > beats[0]+1.25*intervals[0]
++            or attacks[-1] < beats[-1]-1.25*intervals[-1]):
++        return None
++    positions = np.searchsorted(beats, attacks).clip(0, len(beats)-1)
++    left = np.maximum(0, positions-1)
++    positions = np.where(abs(beats[left]-attacks) < abs(beats[positions]-attacks), left, positions)
++    close = abs(beats[positions]-attacks) <= .035
++    run = 0
++    for i, matched in enumerate(close):
++        run = (run+1 if i and positions[i]-positions[i-1] == 1 else 1) if matched else 0
++        if run >= 8:
++            break
++    else:
++        return None  # A subdivision/half-time attack train is not confirmation.
++    return attacks
++
++
++def stable_tempo_map(beats, pulse_verified=False):
++    """Fit a sparse tempo map, rather than exporting detector interval jitter.
++
++    Reliable runs need at least eight beats. Noisy passages are bridged with an
++    estimated grid, and disclosed. Median local line estimates suppress timing
++    jitter; a 60 ms approximation budget reduces them to a few linear sections.
++    This tolerance applies to the estimated GRID, never to note playback times.
++    """
++    beats, _ = clean_isolated_beats(beats, [])
++    intervals = np.diff(beats)
++
++    def fallback():
++        period = float(np.median(intervals))
++        return beats[[0, -1]], np.array([0., (beats[-1]-beats[0])/period]), True
++
++    if len(beats) < 9:
++        return fallback()
++    confidence = []
++    for i in range(len(beats)):
++        # Either side may support a beat: an abrupt, sustained change should
++        # not be rejected merely because the two sides have different tempos.
++        sides = [intervals[max(0, i-6):i], intervals[i:i+6]]
++        scores = [np.mean(abs(side-np.median(side)) <= .18*np.median(side))
++                  for side in sides if len(side) >= 4]
++        confidence.append(max(scores, default=0))
++    reliable = np.asarray(confidence) >= .8
++    starts = np.flatnonzero(reliable & ~np.r_[False, reliable[:-1]])
++    ends = np.flatnonzero(reliable & ~np.r_[reliable[1:], False]) + 1
++    for start, end in zip(starts, ends):
++        if end-start < 8:
++            reliable[start:end] = False
++        else:
++            # Keep uncertain transition edges out of the local slope estimate.
++            if start > 0:
++                reliable[start:start+3] = False
++            if end < len(beats):
++                reliable[end-3:end] = False
++    if reliable.sum() < 8:
++        return fallback()
++    times = beats[reliable]
++    original_indices = np.flatnonzero(reliable)
++    cuts = np.r_[0, np.flatnonzero(np.diff(original_indices) > 1)+1, len(times)]
++    periods = np.empty(len(times))
++    for start, end in zip(cuts[:-1], cuts[1:]):
++        for i in range(start, end):
++            periods[i] = np.median(np.diff(times[max(start, i-6):min(end, i+7)]))
++    increments = np.where(np.diff(original_indices) == 1, 1,
++                          np.maximum(1, np.round(np.diff(times)/((periods[:-1]+periods[1:])/2))))
++    # Repair isolated missed beats only when both surrounding tempos agree.
++    for i, gap in enumerate(np.diff(times)):
++        left = np.diff(times[max(0, i-4):i+1])
++        right = np.diff(times[i+1:i+6])
++        if len(left) < 2 or len(right) < 2:
++            continue
++        a, b = np.median(left), np.median(right)
++        period = (a+b)/2
++        multiple = round(gap/period)
++        if (abs(a-b) < .15*period and 2 <= multiple <= 4
++                and abs(gap-multiple*period) < .15*period):
++            increments[i] = multiple
++    counts = np.r_[0, np.cumsum(increments)]
++    smoothed = []
++    for i in range(len(times)):
++        run = np.searchsorted(cuts, i, side='right')-1
++        lo, hi = max(cuts[run], i-4), min(cuts[run+1], i+5)
++        x, t = counts[lo:hi], times[lo:hi]
++        slope = np.median(np.diff(t)/np.diff(x))
++        left = np.diff(times[max(cuts[run], i-4):i+1])
++        right = np.diff(times[i:min(cuts[run+1], i+5)])
++        if (len(left) >= 2 and len(right) >= 2
++                and abs(np.median(left)-np.median(right)) > .12*max(np.median(left), np.median(right))):
++            smoothed.append(times[i])  # Preserve corners at real tempo changes.
++        else:
++            smoothed.append(np.median(t-slope*(x-counts[i])))
++    # Independently supported audio attacks have 5 ms resolution. Preserve
++    # their curvature/corners: the wider median smoother can lag accelerando.
++    smoothed = times if pulse_verified else np.asarray(smoothed)
++    if np.any(np.diff(smoothed) <= 0):
++        return fallback()
++    keep, stack = {0, len(times)-1}, [(0, len(times)-1)]
++    while stack:
++        lo, hi = stack.pop()
++        if hi-lo < 2:
++            continue
++        fitted = np.interp(counts[lo:hi+1], counts[[lo, hi]], smoothed[[lo, hi]])
++        error = abs(smoothed[lo:hi+1]-fitted)
++        split = int(np.argmax(error))+lo
++        if error[split-lo] > (.012 if pulse_verified else .060):
++            keep.add(split)
++            stack.extend([(lo, split), (split, hi)])
++    keep = sorted(keep)
++    return smoothed[keep], counts[keep], not reliable.all()
++
++
++def detect(wav, sr):
++    """Preserve variable beats; detector errors are disclosed, never guessed away."""
++    try:
++        from beat_this.inference import Audio2Beats
++        signal = wav.detach().cpu().numpy()
++        if signal.ndim > 1:
++            signal = signal.mean(axis=0)
++        if len(signal) < sr:
++            raise RhythmError("Recording is too short for automatic beat detection.")
++        beats, downbeats = Audio2Beats(checkpoint_path='final0', device='cpu', dbn=False)(signal, sr)
++        beats = np.asarray(beats, dtype=float)
++        if len(beats) < 8 or not np.isfinite(beats).all() or np.any(np.diff(beats) <= 0):
++            raise RhythmError("Not enough reliable beats were detected.")
++        beats, downbeats = clean_isolated_beats(beats, downbeats)
++        pulse_verified = False
++        # Audio verification is optional. A failed verification must never
++        # discard otherwise usable neural detections.
++        try:
++            candidate = audio_pulse_candidate(signal, sr, beats)
++            if candidate is not None:
++                x, q, _ = stable_tempo_map(beats)
++                grid = interp(np.arange(np.ceil(q[0]), np.floor(q[-1])+1), q, x)
++                positions = np.searchsorted(grid, candidate).clip(0, len(grid)-1)
++                distance = np.minimum(abs(grid[positions]-candidate), abs(grid[np.maximum(0, positions-1)]-candidate))
++                # Leave already aligned detections alone. Recovery requires
++                # a sustained disagreement, not isolated attack jitter.
++                if np.mean(distance > .045) >= .15:
++                    beats = candidate
++                    # The neural downbeats belong to the rejected grid. Do not
++                    # turn them into a fabricated meter for the replacement.
++                    downbeats = np.array([])
++                    pulse_verified = True
++        except Exception:
++            logging.exception('Optional audio pulse verification unavailable')
++        try:
++            from .rhythm_evidence import percussion_meter
++            evidence = percussion_meter(signal, sr, beats, downbeats)
++            if evidence is not None:
++                return Detection(**evidence, pulse_verified=True,
++                    warning='Auto used repeated percussion accents and subdivisions to suggest the beat grid and meter. Check the click preview, especially at meter changes; musical notation can still be ambiguous.')
++        except Exception:
++            logging.exception('Optional percussion meter evidence unavailable')
++        intervals = np.diff(beats)
++        if np.any(intervals < .06) or np.any(intervals > 6):
++            raise RhythmError("Beat tracking contains implausible gaps; set manual anchors.")
++        downs = np.asarray(downbeats, dtype=float)
++        downs = downs[np.isfinite(downs) & (downs >= beats[0]) & (downs <= beats[-1])]
++        warning = ''
++        if len(intervals) > 2 and np.any(np.abs(np.log(intervals[1:] / intervals[:-1])) > np.log(1.65)):
++            warning = 'Abrupt beat-spacing changes detected. Check the click preview; missed or extra beats may need manual anchors.'
++        if pulse_verified:
++            warning = 'Auto recovered a clear audio pulse where the beat model drifted. Check the click preview and set the time signature manually.'
++        return Detection(beats.tolist(), downs.tolist(), warning, pulse_verified)
++    except Exception as exc:
++        logging.exception('Rhythm detection unavailable')
++        return Detection([], [], "Tempo could not be detected. Timing is preserved with placeholder 120 BPM. Set a manual tempo or beat anchors to align the grid.")
++
++
++def interp(value, x, y):
++    """Linear map with linear endpoint extrapolation, including pickups/tails."""
++    a = np.asarray(value, dtype=float)
++    result = np.interp(a, x, y)
++    result = np.where(a < x[0], y[0] + (a-x[0]) * (y[1]-y[0])/(x[1]-x[0]), result)
++    result = np.where(a > x[-1], y[-1] + (a-x[-1]) * (y[-1]-y[-2])/(x[-1]-x[-2]), result)
++    return result
++
++
++class Timeline:
++    def __init__(self, settings, detection, duration):
++        self.o = o = options(settings)
++        self.duration = duration
++        if o['mode'] == 'manual' and o['first_downbeat'] > duration:
++            raise RhythmError('The first downbeat must be within the recording.')
++        if o['anchors'] and o['anchors'][-1][0] > duration:
++            raise RhythmError('Beat anchors must be within the recording.')
++        self.warnings = [detection.warning] if detection.warning else []
++        self.meter_inferred = False
++        self.meter = signature(o['meter']) if o['meter'] != 'auto' else None
++        beats = np.asarray(detection.beats, dtype=float)
++        downs = np.asarray(detection.downbeats, dtype=float)
++        if self.meter is None and detection.meter_segments:
++            self.meter = tuple(detection.meter_segments[0][1:3])
++            self.meter_inferred = True
++        if self.meter is None and len(downs) >= 3 and len(beats) >= 2:
++            positions = np.searchsorted(beats, downs)
++            positions = np.minimum(positions, len(beats)-1)
++            left = np.maximum(positions-1, 0)
++            positions = np.where(abs(beats[left]-downs) < abs(beats[positions]-downs), left, positions)
++            counts = np.diff(positions)
++            vals, tally = np.unique(counts, return_counts=True)
++            winner = int(vals[np.argmax(tally)])
++            if 2 <= winner <= 12 and max(tally)/len(counts) >= .9:
++                self.meter = (winner, 4)
++                self.meter_inferred = True
++        if o['meter_changes'] and self.meter is None:
++            raise RhythmError('Choose the starting time signature before adding meter changes.')
++        self.unit = {'quarter': 1., 'dotted-quarter': 1.5, 'eighth': .5}.get(o['unit'])
++        if self.unit is None:
++            self.unit = meter_unit(self.meter)
++        self.unit_name = {1.: 'quarter', 1.5: 'dotted-quarter', .5: 'eighth'}[self.unit]
++        self.detected = len(beats) >= 2
++        first = float(downs[0]) if len(downs) else float(beats[0]) if len(beats) else 0.
++        if o['anchors']:
++            self.x = np.array([a[0] for a in o['anchors']])
++            self.q = np.array([(a[1]-1)*self.unit for a in o['anchors']])
++            first = float(interp(0, self.q, self.x))
++            self.warnings = []  # Explicit anchors replace the detected grid.
++        elif o['mode'] == 'manual':
++            first = o['first_downbeat']
++            self.x = np.array([first, first + 60/o['bpm']])
++            self.q = np.array([0., self.unit])
++            self.warnings = []  # Manual BPM replaces the detected grid.
++        elif self.detected:
++            self.x, pulse, uncertain = stable_tempo_map(beats, detection.pulse_verified)
++            # Percussion evidence carries a quarter-note lattice, independently
++            # of whether the visible BPM uses dotted quarters or eighths.
++            detected_unit = 1. if detection.meter_segments else self.unit
++            self.q = pulse*detected_unit*o['factor']
++            self.q -= float(interp(first, self.x, self.q))
++            # Normalize only a supported constant estimate. Both limits matter:
++            # a tiny BPM difference can still cause substantial drift on a long
++            # recording. This changes musical coordinates, never source seconds.
++            if len(self.x) == 2 and not uncertain:
++                estimated = 60*(self.q[1]-self.q[0])/(self.unit*(self.x[1]-self.x[0]))
++                whole = round(estimated)
++                extent = max(abs(first), abs(duration-first))
++                drift = extent*abs(estimated-whole)/whole if whole > 0 else math.inf
++                if abs(estimated-whole) <= .05 and drift <= .020:
++                    self.q = (self.x-first)*self.unit*whole/60
++            if uncertain:
++                self.warnings = ['Some beat detections were unreliable. Auto approximated those sections instead of exporting tempo spikes. Check the click preview; use manual BPM or anchors to correct the grid.']
++        else:
++            self.x = np.array([0., .5])
++            self.q = np.array([0., 1.])
++            self.unit = 1.
++            self.unit_name = 'quarter'
++        self.usable = self.detected or bool(o['anchors']) or o['mode'] == 'manual'
++        if o['quantize'] and not self.usable:
++            self.warnings.append('Quantization was not applied: no usable beat grid. Original timing was exported.')
++        self.quantized = o['quantize'] and self.usable
++        self.first = first
++        self.periods = np.diff(self.x)/np.diff(self.q)
++        # Summarize the dominant duration, not the number of tempo-map knots.
++        order = np.argsort(self.periods)
++        weights = np.cumsum(np.diff(self.x)[order])
++        typical = self.periods[order[np.searchsorted(weights, weights[-1]/2)]]
++        self.bpm = o['bpm'] if o['mode'] == 'manual' and not o['anchors'] else 60/(self.unit*float(typical))
++        # Audio and MIDI both start at zero. Never prepend silence to align a
++        # bar. A signature event at the first downbeat marks the pickup boundary;
++        # hosts that only allow whole-bar changes may need their own pickup setting.
++        self.shift = -float(self.to_q(0))
++        self.meters = [(0., self.meter)] if self.meter else []
++        first_q = self.shift
++        if self.meter and first_q > 1e-8:
++            # Where possible encode the leading partial measure exactly.
++            for denominator in (4, 8, 16, 32, 64, 128):
++                numerator = first_q * denominator / 4
++                if abs(numerator-round(numerator)) < 1e-7 and 1 <= round(numerator) <= 255:
++                    self.meters[0] = (0., (round(numerator), denominator))
++                    break
++            self.meters.append((first_q, self.meter))
++        previous_bar, previous_q, previous_meter = 1, 0., self.meter
++        for bar_number, n, d in o['meter_changes']:
++            at = previous_q + (bar_number-previous_bar)*previous_meter[0]*4/previous_meter[1]
++            self.meters.append((max(0., at+self.shift), (n, d)))
++            previous_bar, previous_q, previous_meter = bar_number, at, (n, d)
++        self.groupings = []
++        self.meter_changes_inferred = False
++        if (detection.meter_segments and o['mode'] == 'auto' and not o['anchors']
++                and o['meter'] == 'auto' and not o['meter_changes'] and o['factor'] == 1):
++            self.meter_changes_inferred = len(detection.meter_segments) > 1
++            for i, (second, n, d, groups) in enumerate(detection.meter_segments):
++                at = max(0., float(self.to_q(second))+self.shift)
++                if i:
++                    self.meters.append((at, (n, d)))
++                if o['unit'] == 'auto':
++                    self.groupings.append((at, np.asarray(groups)*4/d))
++        self.offset = 0.
++
++    def to_q(self, t):
++        return interp(t, self.x, self.q)
++
++    def seconds_at_q(self, q):
++        return interp(q, self.q, self.x)
++
++    def export_seconds(self, t):
++        return self.seconds_at_q(self.to_q(t)) + self.offset
++
++    def step(self, boundaries):
++        if self.o['subdivision'] != 'auto':
++            return 1/int(self.o['subdivision'])
++        # Releases matter too: quarter-note attacks can have eighth/sixteenth
++        # articulation. Using attacks alone collapses short notes to tiny blips.
++        q = np.asarray(self.to_q(boundaries))
++        if not len(q):
++            return .25
++        for step in (1., .5, 1/3, .25):
++            if np.quantile(abs(q/step-np.round(q/step)), .8) <= .12:
++                return step
++        return .25
++
++    def display_grid(self):
++        end = float(self.to_q(self.duration))
++        start = float(self.to_q(0))
++        quarters = []
++        sections = self.meters or [(0., None)]
++        for i, (at, meter) in enumerate(sections):
++            lower = max(start, at-self.shift)
++            upper = min(end, sections[i+1][0]-self.shift) if i+1 < len(sections) else end
++            unit = meter_unit(meter) if self.o['unit'] == 'auto' and meter else self.unit
++            # A pickup is a partial measure, not a new metronome phase/unit.
++            phase = at-self.shift if i else 0.
++            if i == 0: unit = self.unit
++            grouping = next((g for position, g in reversed(self.groupings) if position <= at+1e-8), None)
++            if grouping is not None:
++                bar = float(sum(grouping))
++                offsets = np.r_[0., np.cumsum(grouping[:-1])]
++                candidates = [q+offset for q in np.arange(phase+math.floor((lower-phase)/bar)*bar, upper+1e-9, bar)
++                              for offset in offsets if lower-1e-9 <= q+offset <= upper+1e-9]
++            else:
++                first = math.ceil((lower-phase)/unit-1e-9)*unit+phase
++                candidates = np.arange(first, upper+1e-9, unit)
++            for q in candidates:
++                if i+1 < len(sections) and q >= upper-1e-9: continue
++                quarters.append(q)
++        times = self.seconds_at_q(np.array(quarters))
++        # Preview and MIDI share the original audio's time origin.
++        origin = float(self.seconds_at_q(start))
++        times = times-origin
++        bars = []
++        for i, (at, meter) in enumerate(self.meters):
++            qstart = at-self.shift
++            stop = self.meters[i+1][0]-self.shift if i+1 < len(self.meters) else end+meter[0]*4/meter[1]
++            bar = meter[0]*4/meter[1]
++            for q in np.arange(qstart, stop-1e-8, bar):
++                t = float(self.seconds_at_q(q))-origin
++                if t >= 0:
++                    bars.append(t)
++        return dict(bpm=self.bpm, beats_per_bar=(self.meter[0]*4/self.meter[1]/self.unit) if self.meter else None,
++                    first_downbeat=float(self.seconds_at_q(0))-origin, onset_delay=0,
++                    beats=times.tolist(), downbeats=bars, unit=self.unit_name,
++                    meter=f'{self.meter[0]}/{self.meter[1]}' if self.meter else None)
++
++
++def render(model, events, detection, settings, duration):
++    timeline = Timeline(settings, detection, duration)
++    raw = model.events_to_midi_bytes(iter(events), beat_grid=None, quantize=False)
++    return retime(raw, timeline)
++
++
++def retime(raw, timeline):
++    """Export the engine's validated notes using the exact same piecewise map as tempo."""
++    source = mido.MidiFile(file=io.BytesIO(raw))
++    ppq = 9600
++    result = mido.MidiFile(type=1, ticks_per_beat=ppq)
++    conductor = mido.MidiTrack()
++    result.tracks.append(conductor)
++    # Serialize the tempo map first: integer microsecond tempos accumulate
++    # rounding error over long recordings. Preserve source seconds using the
++    # actual map a MIDI player will read, not the ideal floating-point BPM.
++    qs = [ -timeline.shift, *[float(q) for q in timeline.q if q > -timeline.shift] ]
++    knots = []
++    for q in qs:
++        index = min(max(int(np.searchsorted(timeline.q, q, side='right'))-1, 0), len(timeline.q)-2)
++        us = round(1000000*(timeline.x[index+1]-timeline.x[index])/(timeline.q[index+1]-timeline.q[index]))
++        if not 1 <= us <= 0xFFFFFF:
++            raise RhythmError('This tempo is outside the MIDI range. Check the beat anchors.')
++        if not knots or us != knots[-1][1]:
++            knots.append((max(0, round((q+timeline.shift)*ppq)), us))
++    knots = list(dict(knots).items())  # Last tempo wins at coincident ticks.
++    knot_ticks = np.array([tick for tick, _ in knots], dtype=float)
++    tick_periods = np.array([us for _, us in knots], dtype=float)/(1000000*ppq)
++    knot_seconds = np.r_[0., np.cumsum(np.diff(knot_ticks)*tick_periods[:-1])]
++
++    def tick_at_seconds(seconds):
++        i = max(0, int(np.searchsorted(knot_seconds, seconds, side='right'))-1)
++        return max(0, round(knot_ticks[i]+(seconds-knot_seconds[i])/tick_periods[i]))
++
++    def seconds_at_tick(tick):
++        i = max(0, int(np.searchsorted(knot_ticks, tick, side='right'))-1)
++        return float(knot_seconds[i]+(tick-knot_ticks[i])*tick_periods[i])
++
++    # Source exporter is deliberately requested with no grid: constant 120 BPM.
++    tracks = []
++    boundaries = []
++    for track in source.tracks:
++        sec = 0.
++        items = []
++        for msg in track:
++            sec += mido.tick2second(msg.time, source.ticks_per_beat, 500000)
++            if msg.type in ('set_tempo', 'time_signature', 'end_of_track', 'marker'):
++                continue
++            items.append((sec, msg))
++            if msg.type in ('note_on', 'note_off'):
++                boundaries.append(sec)
++        tracks.append(items)
++    step = timeline.step(boundaries) if timeline.quantized else None
++    preview = []
++    merged = 0
++    for items in tracks:
++        if not items:
++            continue
++        output = []
++        pending = {}
++        intervals = {}
++        instrument = next((msg.name for _, msg in items if msg.type == 'track_name'), 'piano')
++        for sec, msg in items:
++            if msg.type not in ('note_on', 'note_off'):
++                output.append((tick_at_seconds(sec), msg))
++                continue
++            q = float(timeline.to_q(sec))
++            if step is not None:
++                q = round(q/step)*step
++            tick = max(0, round((q+timeline.shift)*ppq)) if step is not None else tick_at_seconds(sec)
++            key = (msg.channel, msg.note)
++            if msg.type == 'note_on' and msg.velocity:
++                pending.setdefault(key, deque()).append((tick, msg))
++                if step is None: output.append((tick, msg))
++            elif pending.get(key):
++                start, on = pending[key].popleft()
++                tick = max(tick, start+max(1, round(step*ppq)) if step is not None else start+1)
++                intervals.setdefault(key, []).append([start, tick, on, msg])
++                if step is None: output.append((tick, msg))
++            elif step is None:
++                output.append((tick, msg))
++        for notes in intervals.values():
++            cleaned = []
++            for note in sorted(notes, key=lambda n:n[0]):
++                if step is not None and cleaned and note[0] == cleaned[-1][0]:
++                    # Two attacks snapped to one point: one sounding note,
++                    # ending at the later release, rather than a stuck overlap.
++                    cleaned[-1][1] = max(cleaned[-1][1], note[1])
++                    merged += 1
++                    continue
++                if step is not None and cleaned:
++                    cleaned[-1][1] = min(cleaned[-1][1], note[0])
++                cleaned.append(note)
++            for start, end, on, off in cleaned:
++                if step is not None: output.extend(((start, on), (end, off)))
++                preview.append(dict(pitch=on.note,
++                    start=seconds_at_tick(start),
++                    end=seconds_at_tick(end),
++                    instrument=instrument.replace(' ', '_')))
++        if step is None:
++            output.sort(key=lambda item: item[0])  # Preserve simultaneous controller/note ordering.
++        else:
++            output.sort(key=lambda item: (item[0], 0 if item[1].type == 'note_off' or (item[1].type == 'note_on' and not item[1].velocity) else 1))
++        track = mido.MidiTrack()
++        last = 0
++        for tick, msg in output:
++            track.append(msg.copy(time=tick-last))
++            last = tick
++        result.tracks.append(track)
++    metadata = [(tick, mido.MetaMessage('set_tempo', tempo=us)) for tick, us in knots]
++    for q, (n, d) in timeline.meters:
++        click_unit = meter_unit((n, d)) if timeline.o['unit'] == 'auto' else timeline.unit
++        if q == 0: click_unit = timeline.unit
++        metadata.append((round(q*ppq), mido.MetaMessage('time_signature', numerator=n, denominator=d,
++                         clocks_per_click=round(click_unit*24))))
++    if timeline.first > 0:
++        metadata.append((max(0, round(timeline.shift*ppq)), mido.MetaMessage('marker', text=f'First downbeat: {timeline.first:.6f}s')))
++    last = 0
++    for tick, msg in sorted(metadata, key=lambda item: item[0]):
++        conductor.append(msg.copy(time=tick-last))
++        last = tick
++    buffer = io.BytesIO()
++    result.save(file=buffer)
++    grid = timeline.display_grid() if timeline.usable else None
++    variable = np.ptp(timeline.periods) > .015
++    state = 'Original timing'
++    if timeline.quantized:
++        state = 'Notes quantized'
++    summary = f"{timeline.bpm:.1f} BPM{' · ' + timeline.unit_name if timeline.unit_name != 'quarter' else ''} · {grid['meter'] or 'meter uncertain'}{' + meter changes suggested' if timeline.meter_changes_inferred else ' suggested' if timeline.meter_inferred else ''} · {'variable tempo · ' if variable else ''}{state}" if grid else 'Tempo unavailable · placeholder 120 BPM · original timing preserved'
++    warnings = list(timeline.warnings)
++    if merged:
++        warnings.append(f'Quantization merged {merged} same-pitch attacks on the same grid point. Choose a finer subdivision or turn off Strict quantization to retain every attack.')
++    return dict(data=base64.b64encode(buffer.getvalue()).decode('ascii'), beat_grid=grid,
++                warnings=warnings, summary=summary, quantized=timeline.quantized,
++                notes=sorted(preview, key=lambda n:n['start']), duration=max([duration_from(timeline), *[n['end'] for n in preview]]))
++
++
++def duration_from(timeline):
++    return float(timeline.export_seconds(timeline.duration)-timeline.export_seconds(0))
++
++
++def click_wav(grid, duration):
++    """Small mono click file for desktop review; generated locally."""
++    import soundfile as sf
++    sr = 16000
++    duration = min(max(duration, 1), 3600)
++    audio = np.zeros(int((duration+.2)*sr), dtype=np.float32)
++    if grid:
++        downbeats = np.asarray(grid['downbeats'])
++        for second in sorted(set(grid['beats'] + grid['downbeats'])):
++            start = round(second*sr)
++            if not 0 <= start < len(audio):
++                continue
++            accented = len(downbeats) and np.min(abs(downbeats-second)) < .02
++            t = np.arange(min(int(.035*sr), len(audio)-start))/sr
++            audio[start:start+len(t)] += (.65 if accented else .35)*np.sin(2*np.pi*(1500 if accented else 1000)*t)*np.exp(-t*100)
++    buffer = io.BytesIO()
++    sf.write(buffer, audio, sr, format='WAV')
++    return buffer.getvalue()
+diff --git a/muscriptor/utils/rhythm_evidence.py b/muscriptor/utils/rhythm_evidence.py
+new file mode 100644
+index 0000000..38f5365
+--- /dev/null
++++ b/muscriptor/utils/rhythm_evidence.py
+@@ -0,0 +1,147 @@
++"""Conservative percussion/accent evidence for ambiguous neural beat grids.
++
++A repeated accent is a meter *suggestion*, not proof of written notation.
++No model download, source separation, or changes to audio/note timing.
++"""
++import numpy as np
++
++
++def onset_bands(signal, sr):
++    """Bounded-memory spectral flux, with independent bass and cymbal bands."""
++    hop = max(1, round(sr*.005))
++    size = 2**int(np.ceil(np.log2(sr*.064)))
++    frames = np.lib.stride_tricks.sliding_window_view(np.pad(signal, (size//2, size//2)), size)[::hop]
++    frequencies = np.fft.rfftfreq(size, 1/sr)
++    bands = [(frequencies >= 35) & (frequencies <= 160),
++             (frequencies >= 1500) & (frequencies <= min(7000, sr/2))]
++    window = np.hanning(size)
++    energy = []
++    for start in range(0, len(frames), 512):
++        spectrum = abs(np.fft.rfft(frames[start:start+512]*window, axis=1))
++        energy.append(np.stack([spectrum[:, band].sum(axis=1) for band in bands], axis=1))
++    flux = np.maximum(0., np.diff(np.concatenate(energy), axis=0, prepend=np.zeros((1, 2))))
++    result = []
++    for band in range(2):
++        values = flux[:, band]
++        peaks = np.flatnonzero((values[1:-1] > values[:-2]) & (values[1:-1] >= values[2:]))+1
++        blocked = np.zeros(len(values), dtype=bool)
++        selected = []
++        radius, neighborhood = max(1, round(.08*sr/hop)), max(1, round(sr/hop))
++        for i in peaks[np.argsort(values[peaks])[::-1]]:
++            if blocked[i] or values[i] < max(1e-4, .2*np.max(values[max(0, i-neighborhood):i+neighborhood+1])):
++                continue
++            selected.append(i)
++            blocked[max(0, i-radius):i+radius+1] = True
++        selected = np.asarray(sorted(selected), dtype=int)
++        result.append((selected*hop/sr, values[selected]))
++    return result
++
++
++def percussion_meter(signal, sr, neural_beats, neural_downbeats=None):
++    """Accept only repeated bars with clear accents and independent subdivisions.
++
++    Each section needs four consecutive matching bars, the whole recording at
++    least six. Irregular fills, sparse/crossing cues and ambiguous accents cause
++    rejection, retaining the neural result. Unequal 2/3 groups represent odd
++    meter, not alternating tempos. Covers changing meters only when every
++    section has sufficient repeated evidence.
++    """
++    (low, strength), (high, _) = onset_bands(signal, sr)
++    if len(low) < 16 or len(high) < 24 or len(neural_beats) < 8:
++        return None
++    # Relative strengths tolerate slow gain changes without treating every hit
++    # as a downbeat. Require a clearly separated accent population.
++    normalized = np.array([v/max(np.quantile(strength[max(0,i-12):i+13], .9), 1e-8)
++                           for i, v in enumerate(strength)])
++    accented = normalized >= .88
++    if not .1 <= np.mean(accented) <= .55:
++        return None
++    if np.quantile(normalized[accented], .1) < 1.18*np.quantile(normalized[~accented], .9):
++        return None
++    accents = np.flatnonzero(accented)
++    if len(accents) < 7 or accents[0] > 1 or len(low)-1-accents[-1] > accents[-1]-accents[-2]:
++        return None
++    bars = []
++    for a, b in zip(accents[:-1], accents[1:]):
++        start, end = low[a], low[b]
++        # Align the independently detected high-band grid to these accents.
++        ia, ib = int(np.argmin(abs(high-start))), int(np.argmin(abs(high-end)))
++        if max(abs(high[ia]-start), abs(high[ib]-end)) > .03 or ib <= ia:
++            return None
++        subdivisions = np.diff(high[ia:ib+1])
++        if np.min(subdivisions) < .10 or np.max(subdivisions) > .6:
++            return None
++        hits = low[a:b+1]
++        fractions = (hits-start)/(end-start)
++        uniform = np.max(abs(subdivisions/np.median(subdivisions)-1)) <= .08
++        subdivision = (end-start)/len(subdivisions)
++        groups = np.diff(np.rint((hits-start)/subdivision).astype(int)) if uniform else None
++        if uniform and np.max(abs((hits-start)/subdivision-np.rint((hits-start)/subdivision))) <= .08:
++            if len(groups) in (2, 3, 4, 5, 7) and np.all(groups == 2):
++                n, d, click = len(groups), 4, [1]*len(groups)
++            elif len(groups) in (2, 3, 4) and np.all(groups == 3):
++                n, d, click = 3*len(groups), 8, groups.tolist()
++            elif 2 <= len(groups) <= 5 and set(groups) == {2, 3} and sum(groups) % 2:
++                n, d, click = int(sum(groups)), 8, groups.tolist()
++            else:
++                return None
++        else:
++            # Swing has two unequal subdivisions per *equal* primary beat.
++            count = len(hits)-1
++            if count not in (2, 3, 4, 5, 7) or len(subdivisions) != count*2:
++                return None
++            if np.max(abs(fractions-np.linspace(0,1,count+1))) > .025:
++                return None
++            pairs = subdivisions.reshape(-1,2)
++            ratios = pairs[:,0]/pairs.sum(axis=1)
++            if not np.all((ratios >= .57) & (ratios <= .73)):
++                return None
++            n, d, click = count, 4, [1]*count
++        bars.append((start, end, n, d, click))
++    # A section change is accepted only after sustained evidence on both sides.
++    patterns = [(n,d,tuple(groups)) for _,_,n,d,groups in bars]
++    cuts = [0]+[i for i in range(1,len(bars)) if patterns[i]!=patterns[i-1]]+[len(bars)]
++    if len(cuts) > 257 or any(b-a < 4 for a,b in zip(cuts[:-1],cuts[1:])):
++        return None
++    # The proposal must overlap the model's track and have a simple rhythmic
++    # relationship to it; accent-only detections in a different passage cannot
++    # replace a full recording's beat grid.
++    if low[0] > neural_beats[0]+1.5 or low[-1] < neural_beats[-1]-1.5:
++        return None
++    periods = np.array([(end-start)/(n*4/d) for start,end,n,d,_ in bars])
++    if np.any((periods < .15) | (periods > 1.5)):
++        return None
++    ratios = np.median(np.diff(neural_beats))/periods
++    agreement = np.min(abs(ratios[:, None]/np.array([.5, 2/3, 1., 1.5, 2.])-1), axis=1)
++    if np.mean(agreement <= .10) < .25:
++        return None
++    # A regular backbeat can look like a shorter bar. Preserve a consistent
++    # model bar interpretation when the quarter pulse already agrees and the
++    # proposed accent bars are exactly half as long. Accent strength alone
++    # does not establish that a snare hit is the written downbeat.
++    if neural_downbeats is not None and len(neural_downbeats) >= 7:
++        model_beats = np.asarray(neural_beats)
++        model_downs = np.asarray(neural_downbeats)
++        positions = np.searchsorted(model_beats, model_downs).clip(0, len(model_beats)-1)
++        left = np.maximum(positions-1, 0)
++        positions = np.where(abs(model_beats[left]-model_downs) < abs(model_beats[positions]-model_downs), left, positions)
++        counts = np.diff(positions)
++        model_count = int(np.median(counts))
++        pulse_agrees = abs(np.median(np.diff(model_beats))/np.median(periods)-1) <= .08
++        if (pulse_agrees and model_count >= 2 and np.mean(counts == model_count) >= .9
++                and np.max(abs(model_beats[positions]-model_downs)) <= .03
++                and all(abs(n*4/d*2-model_count) < .01 for _,_,n,d,_ in bars)):
++            return None
++    # Construct a regular quarter lattice within each evidenced bar, keeping
++    # odd-meter fractional bar positions. Do not feed unequal group intervals
++    # to a tempo estimator as if each were the same musical duration.
++    q = np.r_[0.,np.cumsum([n*4/d for _,_,n,d,_ in bars])]
++    times = np.array([bars[0][0]]+[b[1] for b in bars])
++    tail = low[-1]-times[-1]
++    final_q = q[-1]+tail/periods[-1]
++    quarters = np.arange(0,final_q+1e-8)
++    beats = np.interp(quarters,q,times)
++    beyond = quarters > q[-1]
++    beats[beyond] = times[-1]+(quarters[beyond]-q[-1])*periods[-1]
++    segments = [[float(bars[i][0]),bars[i][2],bars[i][3],bars[i][4]] for i in cuts[:-1]]
++    return dict(beats=beats.tolist(),downbeats=low[accents].tolist(),meter_segments=segments)
+diff --git a/muscriptor/utils/session.py b/muscriptor/utils/session.py
+new file mode 100644
+index 0000000..2534fdd
+--- /dev/null
++++ b/muscriptor/utils/session.py
+@@ -0,0 +1,134 @@
++"""Versioned, data-only local projects shared by desktop and browser."""
++import base64
++import io
++import json
++import math
++import os
++from pathlib import Path
++import tempfile
++import time
++
++import mido
++from .rhythm import Detection, RhythmError, Timeline
++
++MAX_BYTES = 256 * 1024 * 1024
++
++
++def decode(value, limit=MAX_BYTES):
++    if not isinstance(value, str) or len(value) > limit * 4 // 3 + 4:
++        raise RhythmError('Session data is missing or too large.')
++    try:
++        return base64.b64decode(value, validate=True)
++    except (ValueError, TypeError):
++        raise RhythmError('Session contains invalid encoded data.') from None
++
++
++def validate(project):
++    if not isinstance(project, dict) or project.get('format') != 'muscriptor-local' or project.get('version') != 1:
++        raise RhythmError('This is not a supported MuScriptor Local session.')
++    raw = decode(project.get('midi'), 16 * 1024 * 1024)
++    try:
++        midi = mido.MidiFile(file=io.BytesIO(raw))
++        if midi.type == 2 or midi.ticks_per_beat <= 0:
++            raise ValueError()
++        # Sessions store the original constant-tempo performance, never an
++        # already quantized result. Rendering relies on this invariant.
++        if any(m.type == 'set_tempo' and m.tempo != 500000 for t in midi.tracks for m in t):
++            raise ValueError()
++    except Exception:
++        raise RhythmError('Session has an invalid original MIDI performance.') from None
++    duration = project.get('duration')
++    if isinstance(duration, bool) or not isinstance(duration, (float, int)) or not math.isfinite(duration) or not 0 < duration <= 86400:
++        raise RhythmError('Session duration is invalid.')
++    detection = project.get('detection', {})
++    if not isinstance(detection, dict):
++        raise RhythmError('Session beat information is invalid.')
++    arrays = []
++    for name in ('beats', 'downbeats'):
++        values = detection.get(name, [])
++        if not isinstance(values, list) or len(values) > 200000:
++            raise RhythmError('Session beat information is too large.')
++        previous = -1
++        for v in values:
++            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 or v > duration + 1 or v <= previous:
++                raise RhythmError('Session beats must be increasing times within the recording.')
++            previous = v
++        arrays.append(values)
++    if len(arrays[0]) == 1 or (arrays[1] and not arrays[0]):
++        raise RhythmError('Session beat information is incomplete.')
++    warning = detection.get('warning', '')
++    if not isinstance(warning, str) or len(warning) > 4000:
++        raise RhythmError('Session warning is invalid.')
++    pulse_verified = detection.get('pulse_verified', False)
++    if type(pulse_verified) is not bool:
++        raise RhythmError('Session pulse verification is invalid.')
++    segments = detection.get('meter_segments', [])
++    if not isinstance(segments, list) or len(segments) > 256:
++        raise RhythmError('Session meter suggestions are invalid.')
++    previous = -1
++    for segment in segments:
++        if not isinstance(segment, list) or len(segment) != 4:
++            raise RhythmError('Session meter suggestions are invalid.')
++        second, n, denominator, groups = segment
++        if (isinstance(second, bool) or not isinstance(second, (int, float))
++                or not math.isfinite(second) or second < 0 or not previous < second <= duration
++                or type(n) is not int or not 1 <= n <= 32
++                or type(denominator) is not int or denominator not in (4, 8)
++                or not isinstance(groups, list) or not groups
++                or any(type(g) is not int or not 1 <= g <= 32 for g in groups) or sum(groups) != n):
++            raise RhythmError('Session meter suggestions are invalid.')
++        previous = second
++    if segments and (len(arrays[0]) < 2 or not arrays[1]):
++        raise RhythmError('Session meter suggestions need a beat grid.')
++    d = Detection(*arrays, warning, pulse_verified, segments)
++    settings = project.get('timing', {})
++    Timeline(settings, d, duration)
++    audio = decode(project.get('audio')) if project.get('audio') else None
++    name = str(project.get('name', 'Recording'))[:240].replace('\\', '/').split('/')[-1] or 'Recording'
++    audio_name = str(project.get('audio_name', 'recording.wav')).replace('\\', '/').split('/')[-1]
++    return raw, d, duration, settings, audio, name, audio_name
++
++
++def make(raw, detection, duration, timing, name, audio=None, audio_name='recording.wav'):
++    project = dict(format='muscriptor-local', version=1,
++                   midi=base64.b64encode(raw).decode(), detection=detection.__dict__,
++                   duration=duration, timing=timing, name=Path(name).name,
++                   audio=base64.b64encode(audio).decode() if audio else None, audio_name=audio_name)
++    validate(project)
++    return project
++
++
++def read(path):
++    if Path(path).stat().st_size > MAX_BYTES:
++        raise RhythmError('This session is too large (maximum 256 MB).')
++    try:
++        project = json.loads(Path(path).read_text(encoding='utf-8'))
++    except (ValueError, UnicodeError):
++        raise RhythmError('This session could not be read.') from None
++    validate(project)
++    return project
++
++
++def write(path, project):
++    validate(project)
++    data = json.dumps(project, ensure_ascii=False).encode('utf-8')
++    if len(data) > MAX_BYTES:
++        raise RhythmError('Session exceeds 256 MB. Save a shorter recording as a session.')
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, temp = tempfile.mkstemp(prefix='.session-', dir=path.parent)
++    try:
++        with os.fdopen(fd, 'wb') as f:
++            f.write(data)
++            f.flush()
++            os.fsync(f.fileno())
++        os.replace(temp, path)
++    finally:
++        if os.path.exists(temp):
++            os.unlink(temp)
++
++
++def write_recovery(path, project):
++    # Shared by desktop and web, so browser fallback recovery can be compared
++    # with subsequent desktop saves rather than always preferring the disk.
++    write(path, {**project, 'recovery_saved_at': time.time_ns() // 1_000_000})
+diff --git a/web/src/components/AppInfoDialog.tsx b/web/src/components/AppInfoDialog.tsx
+new file mode 100644
+index 0000000..9325530
+--- /dev/null
++++ b/web/src/components/AppInfoDialog.tsx
+@@ -0,0 +1,31 @@
++import { useEffect, useRef, useState } from "react";
++
++type AppInfo = { model?: string; processor?: string; model_directory?: string };
++
++export function AppInfoDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
++  const dialog = useRef<HTMLDialogElement>(null);
++  const [info, setInfo] = useState<AppInfo>({});
++  useEffect(() => {
++    if (!open) { dialog.current?.close(); return; }
++    dialog.current?.showModal();
++    const controller = new AbortController();
++    fetch("/app-info", { signal: controller.signal })
++      .then(response => response.ok ? response.json() : {})
++      .then(setInfo).catch(() => {});
++    return () => controller.abort();
++  }, [open]);
++  return <dialog ref={dialog} className="app-info-dialog" aria-labelledby="app-info-title" onClose={onClose} onClick={event => {
++    if (event.target === event.currentTarget) dialog.current?.close();
++  }}>
++    <div className="app-info-heading"><h2 id="app-info-title">MuScriptor</h2><button onClick={() => dialog.current?.close()}>Done</button></div>
++    <p>Independent adaptation by Pokestir</p>
++    <p className="app-info-version">Version {import.meta.env.VITE_APP_VERSION || "local edition"}</p>
++    <dl>
++      {info.model && <><dt>Model</dt><dd>{info.model}</dd></>}
++      {info.processor && <><dt>Processor</dt><dd>{info.processor}</dd></>}
++      {info.model_directory && <><dt>Model download folder</dt><dd className="app-info-path">{info.model_directory}</dd></>}
++    </dl>
++    <p>Use the desktop app’s gear menu to change the processor or open the model folder. Return to Desktop before changing the processor.</p>
++    <p>Audio is processed on this computer. Original MuScriptor by Kyutai and Mirelo.</p>
++  </dialog>;
++}
+diff --git a/web/src/components/RhythmPanel.tsx b/web/src/components/RhythmPanel.tsx
+new file mode 100644
+index 0000000..36b9287
+--- /dev/null
++++ b/web/src/components/RhythmPanel.tsx
+@@ -0,0 +1,76 @@
++import type { Dispatch, SetStateAction } from "react";
++
++export type TimingOptions = {
++  mode: string; bpm: string; meter: string; unit: string; first_downbeat: string;
++  quantize: boolean; subdivision: string; factor: number;
++  anchors: string; meter_changes: string;
++};
++export const defaultTiming: TimingOptions = {
++  mode: "auto", bpm: "120", meter: "auto", unit: "auto", first_downbeat: "0",
++  quantize: false, subdivision: "auto", factor: 1, anchors: "", meter_changes: "",
++};
++export function RhythmPanel({ value, onChange, busy, summary, warnings, onApply, click, onClickChange, dirty, error }: {
++  value: TimingOptions; onChange: Dispatch<SetStateAction<TimingOptions>>; busy: boolean;
++  summary?: string; warnings?: string[]; onApply?: () => void;
++  error?: string; click: boolean; onClickChange: (v: boolean) => void; dirty?: boolean;
++}) {
++  const set = (key: keyof TimingOptions, v: string | number | boolean) => onChange(s => ({ ...s, [key]: v }));
++  const commonMeters = ["auto", "2/4", "3/4", "4/4", "6/8", "9/8", "12/8", "5/4", "7/8"];
++  const customMeter = !commonMeters.includes(value.meter);
++  return <section className="rhythm-panel" aria-label="Timing settings">
++    <fieldset disabled={busy} className="rhythm-fields">
++      <div className="rhythm-main">
++        <label className="rhythm-field"><span>Tempo</span>
++          <select value={value.mode} onChange={e => onChange(s => ({...s, mode:e.target.value}))}>
++            <option value="auto">Auto</option><option value="manual">Manual</option>
++          </select>
++        </label>
++        <label className="rhythm-field"><span>Time signature</span>
++          <select value={customMeter ? "custom" : value.meter} onChange={e => set("meter",e.target.value === "custom" ? "5/8" : e.target.value)}>
++            {commonMeters.map(m => <option key={m} value={m}>{m === "auto" ? "Auto" : m}</option>)}
++            <option value="custom">Custom…</option>
++          </select>
++        </label>
++        <label className="rhythm-check"><input type="checkbox" checked={value.quantize} onChange={e => set("quantize",e.target.checked)} /><span>Strict quantization</span></label>
++      </div>
++      {(value.mode === "manual" || customMeter || value.quantize) && <div className="rhythm-secondary">
++        {value.mode === "manual" && <>
++          <label className="rhythm-field"><span>BPM</span><input type="number" min="10" max="600" step="any" value={value.bpm} onChange={e => set("bpm",e.target.value)} /></label>
++          <span className="rhythm-note">Sets the grid. Playback stays at the original speed.</span>
++        </>}
++        {customMeter && <label className="rhythm-field"><span>Custom signature</span><input value={value.meter} placeholder="5/8" onChange={e => set("meter",e.target.value)} /></label>}
++        {value.quantize && <label className="rhythm-field"><span>Snap to</span><select value={value.subdivision} onChange={e => set("subdivision",e.target.value)}>
++          <option value="auto">Auto</option><option value="2">Eighth notes</option><option value="4">Sixteenth notes</option><option value="3">Eighth-note triplets</option>
++        </select></label>}
++      </div>}
++      {value.quantize && <p className="rhythm-note">Snaps note starts and ends to the grid. Check the click first: an incorrect grid can make rhythm worse. Turn off to restore original timing.</p>}
++      <div className="rhythm-footer">
++        <details className="rhythm-advanced"><summary>Advanced</summary>
++          <div className="rhythm-advanced-content">
++            <p>Tempo sets the grid without changing playback speed. Quantization moves notes.</p>
++            <div className="rhythm-secondary">
++              <label className="rhythm-field"><span>BPM beat unit</span><select value={value.unit} onChange={e => set("unit",e.target.value)}>
++                <option value="auto">From time signature</option><option value="quarter">Quarter note</option><option value="dotted-quarter">Dotted quarter</option><option value="eighth">Eighth note</option>
++              </select></label>
++              <label className="rhythm-field"><span>Detected pulse</span><select value={value.factor} onChange={e => set("factor",Number(e.target.value))}>
++                <option value={1}>Normal</option><option value={0.5}>Half tempo</option><option value={2}>Double tempo</option>
++              </select></label>
++              {value.mode === "manual" && <label className="rhythm-field"><span>First downbeat (seconds)</span><input type="number" min="0" step="any" value={value.first_downbeat} onChange={e => set("first_downbeat",e.target.value)} /></label>}
++            </div>
++            <p>6/8 usually counts dotted-quarter beats. Check Auto’s meter suggestions; enter corrections below.</p>
++            <label className="rhythm-field"><span>Beat anchors</span><textarea rows={3} value={value.anchors} onChange={e => set("anchors",e.target.value)} placeholder={"0.5, 1\n2.5, 5"}/></label>
++            <p>Seconds, beat number. Use at least two anchors; beat 1 is the first downbeat.</p>
++            <label className="rhythm-field"><span>Time-signature changes</span><textarea rows={2} value={value.meter_changes} onChange={e => set("meter_changes",e.target.value)} placeholder="9, 3/4" /></label>
++            <p>Bar number, signature. Bar 1 starts at the first downbeat.</p>
++          </div>
++        </details>
++        {onApply && <label className="rhythm-check rhythm-click"><input type="checkbox" checked={click} onChange={e => onClickChange(e.target.checked)} /><span>Click preview</span></label>}
++        {onApply && dirty && <button type="button" className="rhythm-apply" onClick={onApply}>Apply changes</button>}
++      </div>
++    </fieldset>
++    {dirty && <p role="status" className="rhythm-note">Apply changes to update playback and export.</p>}
++    {summary && !dirty && <p role="status" className="rhythm-result">{summary}</p>}
++    {error && <p role="alert" className="rhythm-warning">{error}</p>}
++    {!dirty && warnings?.map((w,i) => <p key={i} className="rhythm-warning">{w}</p>)}
++  </section>;
++}
+diff --git a/web/src/sessionStorage.ts b/web/src/sessionStorage.ts
+new file mode 100644
+index 0000000..bd48c04
+--- /dev/null
++++ b/web/src/sessionStorage.ts
+@@ -0,0 +1,83 @@
++// A single local recovery session. Never sent anywhere except the local engine.
++export type SavedSession = {
++  format: string; version: number; name: string; timing: Record<string, unknown>;
++  audio?: string | null; audio_name?: string;
++  recovery_saved_at?: number;
++  [key: string]: unknown;
++};
++async function database(): Promise<IDBDatabase> {
++  return new Promise((resolve, reject) => {
++    const request = indexedDB.open('muscriptor-local', 1);
++    request.onupgradeneeded = () => request.result.createObjectStore('recovery');
++    request.onsuccess = () => resolve(request.result);
++    request.onerror = () => reject(request.error);
++  });
++}
++export async function saveRecovery(project: SavedSession): Promise<void> {
++  const saved = {...project, recovery_saved_at: Date.now()};
++  let diskSaved = false;
++  try {
++    const response = await fetch('/session/recovery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(saved)});
++    diskSaved = response.ok;
++  } catch { /* Keep recovery available if the engine has disconnected. */ }
++  if (diskSaved) {
++    // An older browser fallback must not reappear if the engine later goes offline.
++    try {
++      const db = await database();
++      try { await new Promise<void>((resolve,reject) => {
++        const tx = db.transaction('recovery','readwrite');
++        const store = tx.objectStore('recovery');
++        const existing = store.get('latest');
++        existing.onsuccess = () => {
++          const stamp = existing.result?.recovery_saved_at;
++          if (typeof stamp !== 'number' || !Number.isFinite(stamp) || stamp <= saved.recovery_saved_at) store.delete('latest');
++        };
++        tx.oncomplete = () => resolve();
++        tx.onerror = tx.onabort = () => reject(tx.error);
++      }); } finally { db.close(); }
++    } catch { /* The disk copy is already safe, even if browser storage is denied. */ }
++    return;
++  }
++  // Browser storage still protects refreshes when running without the desktop wrapper.
++  const db = await database();
++  try { await new Promise<void>((resolve,reject) => {
++    const tx = db.transaction('recovery','readwrite');
++    tx.objectStore('recovery').put(saved,'latest');
++    tx.oncomplete = () => resolve();
++    tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
++  }); } finally { db.close(); }
++}
++export async function hasSavedRecovery(): Promise<boolean> {
++  try { const r=await fetch('/session/recovery/status'); if(r.ok && (await r.json()).available) return true; } catch { /* browser fallback */ }
++  const db=await database();
++  try { return await new Promise((resolve,reject) => {
++    const request=db.transaction('recovery').objectStore('recovery').count('latest');
++    request.onsuccess=()=>resolve(request.result>0); request.onerror=()=>reject(request.error);
++  }); } finally {db.close();}
++}
++export async function readRecovery(): Promise<SavedSession | undefined> {
++  let disk: SavedSession | undefined;
++  try {
++    const response = await fetch('/session/recovery');
++    if(response.ok) disk = await response.json();
++  } catch { /* Browser fallback. */ }
++  let browser: SavedSession | undefined;
++  try {
++    const db = await database();
++    try { browser = await new Promise((resolve,reject) => {
++      const req = db.transaction('recovery').objectStore('recovery').get('latest');
++      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
++    }); } finally { db.close(); }
++  } catch { /* A readable disk recovery remains usable without browser storage. */ }
++  const savedAt = (project: SavedSession) => typeof project.recovery_saved_at === 'number'
++    && Number.isFinite(project.recovery_saved_at) ? project.recovery_saved_at : 0;
++  if (!disk) return browser;
++  return browser && savedAt(browser) > savedAt(disk) ? browser : disk;
++}
++export async function encodeAudio(file: File): Promise<string> {
++  return new Promise((resolve,reject) => {
++    const reader = new FileReader();
++    reader.onload = () => resolve(String(reader.result).split(',')[1]);
++    reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
++  });
++}

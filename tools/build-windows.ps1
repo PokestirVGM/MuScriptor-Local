@@ -13,9 +13,12 @@ python -m pip install -r requirements-windows-ui.txt
 if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --icon "$PWD/assets/muscriptor.ico" --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
     --add-data "$PWD/assets/muscriptor.ico;resources/assets" `
+    --add-data "$PWD/assets/muscriptor-header-dark.png;resources/assets" `
+    --add-data "$PWD/assets/muscriptor-header-light.png;resources/assets" `
     --add-data "$PWD/src/worker.py;resources/src" `
     --add-data "$PWD/tools/bootstrap-windows.ps1;resources/tools" `
     --add-data "$PWD/requirements-windows.txt;resources" `
+    --add-data "$PWD/VERSION;resources" `
     --add-data "$PWD/upstream/muscriptor;resources/upstream/muscriptor" `
     --add-data "$PWD/upstream/pyproject.toml;resources/upstream" `
     --add-data "$PWD/upstream/README.md;resources/upstream" `
@@ -25,8 +28,8 @@ Copy-Item WINDOWS.md 'build/windows/dist/MuScriptor Local/Read Me First.md' -For
 python tools/collect-windows-licenses.py 'build/windows/dist/MuScriptor Local/Legal'
 if ($LASTEXITCODE -ne 0) { throw 'Could not collect required license notices.' }
 New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
-Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Portable.zip' -Force
-Write-Output 'Built the Windows 1.0 Beta 4 portable archive.'
+Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-RC1-Windows-x64-Portable.zip' -Force
+Write-Output 'Built the Windows 1.0 Release Candidate 1 portable archive.'
 
 $compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (!$compiler) {

@@ -14,6 +14,7 @@ validation/*.mid
 dist/windows/
 .DS_Store
 dist/*.app/
+dist/App Bundle.noindex/
 dist/*.zip
 dist/Legal/
 validation/*-run.txt

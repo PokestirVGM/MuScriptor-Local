@@ -10,6 +10,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import platform
+import queue
+import threading
 import re
 from pathlib import Path
 import shutil
@@ -20,6 +22,11 @@ import sys
 import tempfile
 import time
 import warnings
+
+# Prefer the bundled, patched engine over a stale installed wheel.
+_ENGINE_SOURCE = Path(__file__).resolve().parents[1] / "upstream"
+if (_ENGINE_SOURCE / "muscriptor").is_dir():
+    sys.path.insert(0, str(_ENGINE_SOURCE))
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -240,7 +247,7 @@ def fluidsynth_help():
     return "On macOS, install it with Homebrew: brew install fluidsynth. Then reopen the app."
 
 
-def render_comparison(midi_data, audio, output, soundfont):
+def render_comparison(midi_data, audio, output, soundfont, duration=None):
     """Use upstream rendering with an explicit local SF2; never fetch assets here."""
     from muscriptor.utils.auralization import auralize
     if not shutil.which("fluidsynth"):
@@ -251,6 +258,13 @@ def render_comparison(midi_data, audio, output, soundfont):
         midi = Path(folder) / "performance.mid"
         wav = Path(folder) / "comparison.wav"
         midi.write_bytes(midi_data)
+        if duration is not None:
+            import soundfile as sf
+            with sf.SoundFile(audio) as recording:
+                samples = recording.read(frames=round(duration * recording.samplerate))
+                prefix = Path(folder) / "source-prefix.wav"
+                sf.write(prefix, samples, recording.samplerate, subtype="FLOAT")
+            audio = prefix
         auralize(midi_path=midi, original_audio_path=audio, output_path=wav,
                  soundfont_path=Path(soundfont).expanduser())
         try:
@@ -453,7 +467,8 @@ class Engine:
         cached = {size: cached_weights(size) is not None for size in MODELS}
         emit("ready", model=self.model_size, cached=cached[self.model_size],
              models=cached, directory=str(model_directory(self.model_size)),
-             authenticated=bool(get_token()), instruments=supported_instruments())
+             authenticated=bool(get_token()), instruments=supported_instruments(),
+             recovery_path=str(SUPPORT / "last-session.muscriptor") if (SUPPORT / "last-session.muscriptor").is_file() else None)
 
     def select(self, model):
         model_repo(model)
@@ -552,7 +567,21 @@ class Engine:
             logging.exception("Optional upstream tempo detection unavailable")
             return None
 
-    def transcribe(self, source, destination=None, *, instruments=None, quantize=False, create_ab=False, soundfont=None):
+    def collect_transcription(self, wav, instruments, finish):
+        from muscriptor.events import ProgressEvent
+        from muscriptor.utils.partial import FinishableTranscription
+        run = FinishableTranscription(self.model.transcribe((wav, 16000), instruments=instruments, batch_size=1), wav.shape[-1] / 16000, finish)
+        for event in run:
+            if isinstance(event, ProgressEvent):
+                emit("progress", completed=event.completed, total=event.total,
+                     completed_seconds=run.completed_seconds, can_finish=run.can_finish)
+        if run.partial:
+            emit("warning", message=run.notice)
+        return run
+
+    def transcribe(self, source, destination=None, *, instruments=None, quantize=False, create_ab=False, soundfont=None, timing=None, finish=None):
+        if timing is not None:
+            return self.transcribe_rhythm(source, destination, instruments=instruments, timing={**timing, "quantize": quantize}, create_ab=create_ab, soundfont=soundfont, finish=finish)
         from muscriptor.events import ProgressEvent, NoteStartEvent
         from muscriptor.utils.audio import load_audio
         import mido
@@ -570,12 +599,11 @@ class Engine:
                 try:
                     self.load()
                     emit("status", message="Transcribing…")
-                    events = []
-                    for event in self.model.transcribe((wav, 16000), instruments=instruments):
-                        if isinstance(event, ProgressEvent):
-                            emit("progress", completed=event.completed, total=event.total)
-                        else:
-                            events.append(event)
+                    run = self.collect_transcription(wav, instruments, finish)
+                    events = run.events
+                    if run.partial:
+                        wav = wav[..., :round(run.duration * 16000)]
+                        destination = Path(destination).with_stem(Path(destination).stem + "_partial") if destination else source.with_name(source.stem + "_transcription_partial.mid")
                     break
                 except Exception as exc:
                     if not device_error(exc, self.device):
@@ -603,21 +631,189 @@ class Engine:
                     # Upstream recommends performance timing for listening, even
                     # when the separately exported notation MIDI is quantized.
                     performance = self.model.events_to_midi_bytes(iter(events), beat_grid=grid, quantize=False) if quantize else data
-                    ab_path = render_comparison(performance, audio, output, soundfont)
+                    ab_path = render_comparison(performance, audio, output, soundfont, duration=run.duration if run.partial else None)
                 except Exception as exc:
                     logging.exception("Optional A/B render failed; MIDI preserved")
                     detail = str(exc) if isinstance(exc, UserError) else "Check your local .sf2 SoundFont and free disk space. " + fluidsynth_help() + " Details are in the app’s logs."
                     emit("warning", message="Your MIDI was saved, but A/B audio could not be created. " + detail)
             emit("complete", path=str(output), needs_save=needs_save,
-                 ab_path=str(ab_path) if ab_path else None, quantized=quantized)
+                 ab_path=str(ab_path) if ab_path else None, quantized=quantized, partial=run.partial, completed_seconds=run.duration)
 
 
-def local_web_app(model, web_dir, origin):
+    def transcribe_rhythm(self, source, destination=None, *, instruments=None, timing=None, create_ab=False, soundfont=None, finish=None):
+        from muscriptor.utils import rhythm
+        from muscriptor.events import ProgressEvent
+        from muscriptor.utils.audio import load_audio
+        import base64
+        import torch
+        try:
+            rhythm.options(timing)
+        except rhythm.RhythmError as exc:
+            raise UserError(str(exc), "timing") from exc
+        instruments = validate_options(instruments, timing.get("quantize", False), create_ab)
+        if create_ab:
+            if not shutil.which("fluidsynth"):
+                raise UserError("A/B audio needs FluidSynth. " + fluidsynth_help() + " Or turn off A/B to export MIDI.", "render")
+            if not soundfont or not Path(soundfont).expanduser().is_file():
+                raise UserError("Choose a local SF2 SoundFont before creating A/B audio, or turn off A/B to export MIDI.", "render")
+        source = Path(source)
+        stat = source.stat()
+        key = (str(source.resolve()), stat.st_mtime_ns, stat.st_size, tuple(instruments or []), getattr(self, "model_size", None))
+        cache = getattr(self, "rhythm_cache", None)
+        with decoded_audio(source) as audio:
+            if cache is None or cache.get("key") != key:
+                wav = load_audio(audio)
+                if wav.numel() == 0 or not torch.isfinite(wav).all():
+                    raise UserError("This audio is empty or contains invalid samples.", "audio")
+                while True:
+                    try:
+                        self.load()
+                        emit("status", message="Transcribing…")
+                        run = self.collect_transcription(wav, instruments, finish)
+                        events = run.events
+                        break
+                    except Exception as exc:
+                        if not device_error(exc, self.device):
+                            raise
+                        self.fallback()
+                if run.partial:
+                    wav = wav[..., :round(run.duration * 16000)]
+                cache = dict(key=None if run.partial else key, events=events, wav=wav, detection=None,
+                             name=source.stem + " (partial).wav" if run.partial else source.name, partial=run.partial)
+                if run.partial:
+                    destination = Path(destination).with_stem(Path(destination).stem + "_partial") if destination else source.with_name(source.stem + "_transcription_partial.mid")
+                self.rhythm_cache = cache
+            if cache["detection"] is None:
+                emit("status", message="Detecting beats and meter… The beat helper may download once.")
+                cache["detection"] = rhythm.detect(cache["wav"], 16000)
+            emit("status", message="Applying timing settings…")
+            try:
+                result = self.render_cache(cache, timing)
+            except rhythm.RhythmError as exc:
+                raise UserError(str(exc), "timing") from exc
+            data = base64.b64decode(result["data"])
+            output, needs_save = save_result(source, data, destination)
+            for warning in result["warnings"]:
+                emit("warning", message=warning)
+            ab_path = None
+            if create_ab:
+                try:
+                    performance = self.render_cache(cache, {**timing, "quantize": False})
+                    ab_path = render_comparison(base64.b64decode(performance["data"]), audio, output, soundfont, duration=cache["wav"].shape[-1]/16000 if cache.get("partial") else None)
+                except Exception:
+                    logging.exception("Optional A/B render failed")
+                    emit("warning", message="MIDI saved; A/B rendering failed. Check FluidSynth and the selected SoundFont.")
+            recovery_path = self.autosave_session(timing)
+            emit("complete", path=str(output), needs_save=needs_save, ab_path=str(ab_path) if ab_path else None,
+                 session=True, recovery_path=recovery_path, quantized=result["quantized"], timing_summary=result["summary"], partial=cache.get("partial", False), completed_seconds=cache["wav"].shape[-1]/16000)
+
+    def render_cache(self, cache, timing):
+        from muscriptor.utils import rhythm
+        if "raw" not in cache:
+            cache["raw"] = self.model.events_to_midi_bytes(iter(cache["events"]), beat_grid=None, quantize=False)
+        return rhythm.retime(cache["raw"], rhythm.Timeline(timing, cache["detection"], cache["duration"] if "duration" in cache else cache["wav"].shape[-1]/16000))
+
+    def session_project(self, timing):
+        from muscriptor.utils import session
+        import soundfile as sf
+        cache = getattr(self, "rhythm_cache", None)
+        if cache is None:
+            raise UserError("Open a saved session or transcribe a recording first.", "timing")
+        self.render_cache(cache, timing)  # Validate before saving, without inference.
+        audio = None
+        if cache.get("wav") is not None and cache["wav"].numel() > 0:
+            buffer = io.BytesIO()
+            sf.write(buffer, cache["wav"].detach().cpu().numpy().reshape(-1), 16000, format="WAV", subtype="FLOAT")
+            audio = buffer.getvalue()
+        return session.make(cache["raw"], cache["detection"], cache.get("duration", cache["wav"].shape[-1]/16000),
+                            timing, cache.get("name", "Recording"), audio)
+
+    def autosave_session(self, timing):
+        from muscriptor.utils import session
+        try:
+            session.write_recovery(SUPPORT / "last-session.muscriptor", self.session_project(timing))
+        except Exception:
+            logging.exception("Session recovery save failed")
+            emit("warning", message="MIDI was saved, but the recovery session could not be saved. Use Save Session to choose another folder.")
+        path = SUPPORT / "last-session.muscriptor"
+        return str(path) if path.is_file() else None
+
+    def save_session(self, path, timing):
+        from muscriptor.utils import session
+        session.write(path, self.session_project(timing))
+        emit("session_saved", path=str(path))
+
+    def load_session(self, path):
+        from muscriptor.utils import session
+        from muscriptor.utils.audio import load_audio
+        import torch
+        raw, detection, duration, timing, audio, name, audio_name = session.validate(session.read(path))
+        wav = torch.zeros((1, 0))
+        if audio:
+            suffix = Path(audio_name).suffix.lower()
+            if suffix not in (".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif"):
+                raise UserError("This session's audio format is unsupported.", "timing")
+            with tempfile.TemporaryDirectory(prefix="muscriptor-session-") as folder:
+                encoded = Path(folder) / ("audio" + suffix)
+                encoded.write_bytes(audio)
+                with decoded_audio(encoded) as decoded:
+                    wav = load_audio(decoded)
+            if not torch.isfinite(wav).all() or abs(wav.shape[-1]/16000-duration) > 2:
+                raise UserError("Session audio does not match its duration.", "timing")
+        cache = dict(raw=raw, detection=detection, duration=duration, wav=wav, name=name)
+        self.reexport_session(timing, loaded_cache=cache)
+
+    def reexport_session(self, timing, destination=None, *, loaded_cache=None):
+        import base64
+        cache = loaded_cache if loaded_cache is not None else getattr(self, "rhythm_cache", None)
+        if cache is None:
+            recovery = SUPPORT / "last-session.muscriptor"
+            raise UserError("Reopen your saved session or use Recover Last Session before applying timing.", "timing")
+        result = self.render_cache(cache, timing)
+        target = Path(destination) if destination else SUPPORT / "Results" / (Path(cache.get("name", "Recording")).stem + "_transcription.mid")
+        output, needs_save = save_result(target, base64.b64decode(result["data"]), target)
+        # Only replace the visible/current session once its MIDI is safely saved.
+        if loaded_cache is not None:
+            self.rhythm_cache = cache
+            emit("session_loaded", name=cache["name"], timing=timing, audio=cache["wav"].numel() > 0)
+        for warning in result["warnings"]:
+            emit("warning", message=warning)
+        recovery_path = self.autosave_session(timing)
+        emit("complete", path=str(output), session=True, recovery_path=recovery_path, needs_save=needs_save, timing_summary=result["summary"], quantized=result["quantized"])
+
+    def preview_rhythm(self, timing):
+        from muscriptor.utils import rhythm
+        import soundfile as sf
+        import numpy as np
+        cache = getattr(self, "rhythm_cache", None)
+        if cache is None:
+            raise UserError("Transcribe a recording first to preview its beat grid.", "timing")
+        try:
+            result = self.render_cache(cache, timing)
+        except rhythm.RhythmError as exc:
+            raise UserError(str(exc), "timing") from exc
+        if result["beat_grid"] is None:
+            raise UserError("No beat grid to preview. Enter a manual BPM or beat anchors.", "timing")
+        if cache["wav"].numel() == 0:
+            raise UserError("This session does not contain audio for a click preview.", "timing")
+        duration = max(result["duration"], cache["wav"].shape[-1]/16000)
+        click, sr = sf.read(io.BytesIO(rhythm.click_wav(result["beat_grid"], duration)))
+        original = cache["wav"].detach().cpu().numpy().reshape(-1)
+        count = min(len(original), len(click))
+        click[:count] += .5*original[:count]
+        click /= max(1, np.max(np.abs(click)))
+        SUPPORT.mkdir(parents=True, exist_ok=True)
+        path = SUPPORT / "rhythm-preview.wav"
+        sf.write(path, click, sr)
+        emit("rhythm_preview", path=str(path), message=result["summary"] + " · original audio with click")
+
+
+def local_web_app(model, web_dir, origin, app_info=None):
     from muscriptor.server import create_app
     from starlette.middleware.trustedhost import TrustedHostMiddleware
     from starlette.responses import PlainTextResponse
 
-    app = create_app(model, web_dir=web_dir)
+    app = create_app(model, web_dir=web_dir, recovery_path=SUPPORT / "last-session.muscriptor", app_info=app_info)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
 
     @app.middleware("http")
@@ -651,7 +847,7 @@ def open_web_gui(engine):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
-        app = local_web_app(engine.model, web_dir, origin)
+        app = local_web_app(engine.model, web_dir, origin, dict(model=engine.model_size, processor=str(engine.device), model_directory=str(model_directory(engine.model_size))))
 
         class DesktopServer(uvicorn.Server):
             def capture_signals(self):
@@ -671,6 +867,10 @@ def open_web_gui(engine):
 
 
 def report_error(exc):
+    from muscriptor.utils.rhythm import RhythmError
+    if isinstance(exc, RhythmError):
+        emit("error", code="timing", message=str(exc))
+        return
     if isinstance(exc, UserError):
         emit("error", message=str(exc), code=exc.code)
         return
@@ -688,6 +888,62 @@ def report_error(exc):
         emit("error", code="engine", message="MuScriptor couldn’t finish. Try again or choose another audio file. Details are saved in the app’s logs.")
 
 
+class CommandInbox:
+    """Read Finish requests while the main thread is inside model inference."""
+    def __init__(self, source):
+        self.commands = queue.Queue()
+        self.guard = threading.Lock()
+        self.active = None
+        threading.Thread(target=self._read, args=(source,), daemon=True).start()
+
+    @staticmethod
+    def _lines(source):
+        # Raw descriptor reads avoid leaving a daemon thread holding stdin's
+        # buffered-reader lock when the worker exits after a Quit command.
+        if not hasattr(source, "fileno"):
+            yield from source
+            return
+        buffer = b""
+        while data := os.read(source.fileno(), 65536):
+            buffer += data
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                yield line.decode("utf-8")
+        if buffer:
+            yield buffer.decode("utf-8")
+
+    def _read(self, source):
+        try:
+            for line in self._lines(source):
+                try:
+                    command = json.loads(line)
+                except (ValueError, TypeError):
+                    command = {}
+                if isinstance(command, dict) and command.get("action") == "finish_transcription":
+                    with self.guard:
+                        if self.active and command.get("run_id") == self.active[0]:
+                            self.active[1].set()
+                else:
+                    self.commands.put(line)
+        finally:
+            self.commands.put(None)
+
+    def __iter__(self):
+        while (line := self.commands.get()) is not None:
+            yield line
+
+    @contextlib.contextmanager
+    def transcription(self, run_id):
+        finish = threading.Event()
+        with self.guard:
+            self.active = (run_id, finish) if run_id else None
+        try:
+            yield finish
+        finally:
+            with self.guard:
+                self.active = None
+
+
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SUPPORT.mkdir(parents=True, exist_ok=True)
@@ -700,6 +956,8 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # Upstream diagnostic prints belong in native-launcher stderr, not protocol.
     sys.stdout = sys.stderr
+    if os.name == "posix" and os.getpgrp() != os.getpid():
+        os.setpgid(0, 0)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     original_warning = warnings.showwarning
     def warning(message, *args, **kwargs):
@@ -720,7 +978,8 @@ def main():
         logging.exception("Startup failed")
         emit("error", code="dependencies", message="The Python environment could not start. Use Repair Dependencies in the app menu.")
         return
-    for line in sys.stdin:
+    inbox = CommandInbox(sys.stdin)
+    for line in inbox:
         command = {}
         try:
             command = json.loads(line)
@@ -756,9 +1015,21 @@ def main():
                 emit("planned", path=str(planned_output(source, directory)))
             elif action == "transcribe":
                 destination = Path(command["destination"]).expanduser().absolute() if command.get("destination") else None
-                engine.transcribe(Path(command["path"]).expanduser().resolve(), destination,
-                                  instruments=command.get("instruments"), quantize=command.get("quantize", False),
-                                  create_ab=command.get("create_ab", False), soundfont=command.get("soundfont"))
+                with inbox.transcription(command.get("run_id")) as finish:
+                    engine.transcribe(Path(command["path"]).expanduser().resolve(), destination,
+                                      instruments=command.get("instruments"), quantize=command.get("quantize", False),
+                                      create_ab=command.get("create_ab", False), soundfont=command.get("soundfont"), timing=command.get("timing"), finish=finish)
+            elif action == "save_session":
+                engine.save_session(Path(command["path"]), command.get("timing", {}))
+            elif action == "load_session":
+                engine.load_session(Path(command["path"]))
+            elif action == "reexport_session":
+                engine.reexport_session(command.get("timing", {}), command.get("destination"))
+            elif action == "capabilities":
+                from muscriptor.utils.capabilities import capabilities
+                emit("capabilities", **capabilities())
+            elif action == "preview_rhythm":
+                engine.preview_rhythm(command.get("timing", {}))
             elif action == "quit":
                 break
         except Exception as exc:

@@ -5,11 +5,11 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'windows' if sys.platform == 'win32' el
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from PySide6.QtCore import QProcess, QSettings
-from PySide6.QtGui import QColor, QPalette, QPixmap
+from PySide6.QtCore import QProcess, QSettings, QEvent, QPointF, Qt
+from PySide6.QtGui import QColor, QPalette, QPixmap, QMouseEvent, QKeyEvent
 from PySide6.QtWidgets import QApplication
 from WindowsApp import MainWindow
 
@@ -27,10 +27,111 @@ class WindowsUITests(unittest.TestCase):
         self.window.receive(dict(type='ready', cached=True, authenticated=True, directory='C:/Models/large', instruments=['acoustic_piano', 'drums', 'electric_bass']))
 
     def tearDown(self):
-        self.window.close()
+        with patch.object(self.window, 'confirm_discard_timing', return_value=True):
+            self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
         self.temporary.cleanup()
+
+    def test_late_messages_from_old_worker_are_ignored(self):
+        old=Mock();self.window.worker=Mock()
+        self.window.read_events(old)
+        old.readAllStandardOutput.assert_not_called()
+        self.window.worker.readAllStandardOutput.assert_not_called()
+        self.window.worker=None
+
+    def test_model_download_requirement_keeps_loaded_session_editable(self):
+        self.window.has_session = True
+        self.window.result = self.folder / 'saved.mid'
+        self.window.receive(dict(type='ready', cached=False))
+        self.assertFalse(self.window.options_widget.isHidden())
+        self.assertTrue(self.window.reexport_button.isEnabled())
+        self.window.receive(dict(type='session_loaded', timing={}))
+        self.assertTrue(self.window.setup)  # Opening a session does not download a model.
+
+    def test_return_from_web_restores_latest_session_without_stale_timing(self):
+        self.window.has_session = True
+        self.window.recovery_path = 'old.muscriptor'
+        self.window.web_url = 'http://127.0.0.1:8767'
+        self.window.tempo_bpm.setText('170')
+        with patch.object(self.window, 'start'):
+            self.window.return_to_desktop()
+        self.assertFalse(self.window.has_session)
+        with patch.object(self.window, 'send') as send:
+            self.window.receive(dict(type='ready', cached=True, recovery_path='new.muscriptor'))
+            self.assertEqual(send.call_args.args[0], dict(action='load_session',path='new.muscriptor'))
+        self.assertIsNone(self.window.pending_timing)
+
+    def test_engine_crash_restores_session_and_unapplied_timing_on_retry(self):
+        self.window.has_session = True
+        self.window.recovery_path = 'saved.muscriptor'
+        self.window.tempo_bpm.setText('173')
+        process=Mock();self.window.worker=process
+        self.window.engine_stopped(process)
+        self.assertFalse(self.window.has_session)
+        with patch.object(self.window, 'send') as send:
+            self.window.receive(dict(type='ready',cached=True,recovery_path='saved.muscriptor'))
+            self.assertEqual(send.call_args.args[0]['action'],'load_session')
+        self.window.receive(dict(type='session_loaded',timing={'bpm':120}))
+        self.window.receive(dict(type='complete',path=str(self.folder/'restored.mid'),session=True))
+        self.assertEqual(self.window.tempo_bpm.text(),'173')
+        self.assertIsNone(self.window.pending_timing)
+
+    def test_web_handoff_checks_unsaved_timing_before_replacing_context(self):
+        with patch.object(self.window,'confirm_discard_timing',return_value=False), patch.object(self.window,'send') as send:
+            self.window.open_web_gui()
+        send.assert_not_called()
+
+    def test_finish_control_waits_for_completed_section_and_sends_scoped_request(self):
+        self.window.busy = True
+        self.window.transcription_id = "active-run"
+        self.window.receive(dict(type="progress", completed=0, total=4, completed_seconds=0, can_finish=False))
+        self.assertTrue(self.window.finish_button.isHidden())
+        self.window.receive(dict(type="progress", completed=1, total=4, completed_seconds=5, can_finish=True))
+        self.assertFalse(self.window.finish_button.isHidden())
+        with patch.object(self.window, "send") as send:
+            self.window.finish_transcription(); self.window.finish_transcription()
+            send.assert_called_once()
+            self.assertEqual(send.call_args.args[0], {"action":"finish_transcription", "run_id":"active-run"})
+        self.assertFalse(self.window.finish_button.isEnabled())
+        self.window.receive(dict(type="complete", path=str(self.folder/'partial.mid'), partial=True, completed_seconds=5))
+        self.assertTrue(self.window.finish_button.isHidden())
+        self.assertIn("Partial MIDI saved", self.window.status.text())
+
+    def test_session_menu_dispatch_and_processor_settings_busy_state(self):
+        with patch.object(self.window, 'open_session') as opened:
+            self.window.open_session_action.trigger()
+            opened.assert_called_once_with()
+            self.window.recovery_path = 'saved.muscriptor'
+            self.window.refresh()
+            self.window.recover_action.trigger()
+            self.assertEqual(opened.call_args.args, ('saved.muscriptor',))
+        self.window.show_app_info()
+        self.app.processEvents()
+        self.assertTrue(self.window.info_dialog.isVisible())
+        self.assertTrue(self.window.device.isEnabled())
+        self.window.busy = True
+        self.window.refresh()
+        self.assertFalse(self.window.device.isEnabled())
+        self.assertFalse(self.window.open_session_action.isEnabled())
+        self.window.info_dialog.close()
+
+    def test_instrument_list_drag_keyboard_and_bounds(self):
+        grip = self.window.instrument_resize_handle
+        choices = self.window.instrument_choices
+        def mouse(kind, y, button, buttons):
+            event = QMouseEvent(kind, QPointF(5, 5), QPointF(100, y), button, buttons, Qt.NoModifier)
+            self.app.sendEvent(grip, event)
+        mouse(QEvent.MouseButtonPress, 100, Qt.LeftButton, Qt.LeftButton)
+        mouse(QEvent.MouseMove, 165, Qt.NoButton, Qt.LeftButton)
+        self.assertEqual(choices.height(), 165)
+        mouse(QEvent.MouseButtonRelease, 165, Qt.LeftButton, Qt.NoButton)
+        mouse(QEvent.MouseMove, 200, Qt.NoButton, Qt.NoButton)
+        self.assertEqual(choices.height(), 165)
+        self.app.sendEvent(grip, QKeyEvent(QEvent.KeyPress, Qt.Key_Down, Qt.NoModifier))
+        self.assertEqual(choices.height(), 185)
+        grip.resize_list(1000); self.assertEqual(choices.height(), 320)
+        grip.resize_list(-100); self.assertEqual(choices.height(), 80)
 
     def test_windows_return_and_quit_stop_worker_when_taskkill_is_denied(self):
         # A real child verifies the QProcess-handle fallback, rather than
@@ -64,6 +165,56 @@ class WindowsUITests(unittest.TestCase):
             self.window.transcribe()
             self.assertEqual(send.call_args.args[0]['destination'], str(destination))
             self.assertEqual(send.call_args.args[0]['action'], 'transcribe')
+
+    def test_cancel_stops_child_and_keeps_file_and_timing(self):
+        process = QProcess(self.window)
+        process.start(sys.executable, ['-c', 'import time; time.sleep(60)'])
+        self.assertTrue(process.waitForStarted(5000))
+        self.window.worker = process
+        self.window.busy = True
+        self.window.source = self.folder / 'recording.wav'
+        self.window.tempo_bpm.setText('141')
+        try:
+            with patch.object(self.window, 'start') as restart:
+                self.window.cancel_operation()
+                restart.assert_called_once()
+            self.assertEqual(process.state(), QProcess.NotRunning)
+            self.assertEqual(self.window.source.name, 'recording.wav')
+            self.assertEqual(self.window.tempo_bpm.text(), '141')
+        finally:
+            process.kill(); process.waitForFinished(3000)
+            self.window.worker = None
+
+    def test_cancel_timeout_keeps_retry_cancel_available_and_blocks_new_work(self):
+        process = Mock(); process.waitForFinished.return_value = False
+        self.window.worker = process; self.window.busy = True
+        with patch('WindowsApp.QProcess.execute'), patch.object(self.window, 'start') as restart:
+            self.window.cancel_operation()
+            self.assertTrue(self.window.busy)
+            self.assertFalse(self.window.cancel_button.isHidden())
+            self.assertFalse(self.window.transcribe_button.isEnabled())
+            restart.assert_not_called()
+            process.waitForFinished.return_value = True
+            self.window.cancel_operation()
+            restart.assert_called_once()
+        self.window.worker = None; self.window.busy = False
+
+    def test_session_restores_numeric_subdivision_and_tempo_factor(self):
+        self.window.restore_timing({'subdivision':4, 'factor':1.0, 'meter':'7/8'})
+        self.assertEqual(self.window.tempo_subdivision.currentData(), '4')
+        self.assertEqual(self.window.tempo_factor.currentData(), 1.0)
+        self.assertEqual(self.window.tempo_meter.currentText(), '7/8')
+
+    def test_loaded_session_can_export_without_original_path_or_model(self):
+        self.window.receive(dict(type='session_loaded', name='Saved song', timing={'mode':'manual','bpm':93,'meter':'6/8'}))
+        self.window.receive(dict(type='complete', path=str(self.folder/'restored.mid'), session=True))
+        self.assertIsNone(self.window.source)
+        self.assertEqual(self.window.tempo_bpm.text(), '93')
+        self.assertEqual(self.window.tempo_meter.currentText(), '6/8')
+        with patch.object(self.window, 'send') as send:
+            self.window.apply_session()
+            self.assertEqual(send.call_args.args[0]['action'], 'reexport_session')
+        self.window.has_session = False  # No unsaved-change dialog during test cleanup.
 
     def test_model_switch_is_remembered_and_does_not_download(self):
         with patch.object(self.window, 'send') as send:
@@ -177,11 +328,34 @@ class WindowsUITests(unittest.TestCase):
         self.assertTrue(command['create_ab'])
         self.assertEqual(command['soundfont'], str(self.window.soundfont))
 
+    def test_tempo_is_independent_and_manual_options_are_disclosed(self):
+        self.assertTrue(self.window.manual_timing_widget.isHidden())
+        self.assertTrue(self.window.advanced_timing.isHidden())
+        self.assertEqual(self.window.timing_options()['mode'], 'auto')
+        self.assertFalse(self.window.timing_options()['quantize'])
+        self.window.tempo_mode.setCurrentIndex(1)
+        self.assertFalse(self.window.manual_timing_widget.isHidden())
+        self.window.tempo_bpm.setText('80')
+        self.window.tempo_meter.setCurrentText('6/8')
+        self.window.tempo_anchors.setPlainText('0.5, 1\n2.5, 5')
+        self.window.source = self.folder / 'audio.wav'
+        self.window.destination = self.folder / 'audio.mid'
+        with patch.object(self.window, 'send') as send:
+            self.window.transcribe()
+        timing = send.call_args.args[0]['timing']
+        self.assertEqual((timing['bpm'], timing['meter']), ('80', '6/8'))
+        self.assertNotIn('stretch', timing)
+        self.assertFalse(timing['quantize'])
+        self.window.receive(dict(type='complete', path='song.mid', timing_summary='80 BPM · dotted-quarter · 6/8'))
+        self.assertIn('dotted-quarter', self.window.timing_summary.text())
+
     def test_completion_and_convert_another_reset_result_panels(self):
         self.window.receive(dict(type='complete', path='C:/MIDI/song.mid', ab_path='C:/MIDI/song_AB.wav'))
         self.assertFalse(self.window.complete_widget.isHidden())
         self.assertFalse(self.window.ab_widget.isHidden())
-        self.assertTrue(self.window.options_widget.isHidden())
+        self.assertFalse(self.window.options_widget.isHidden())
+        self.assertFalse(self.window.reexport_button.isHidden())
+        self.assertTrue(self.window.advanced_timing.isHidden())
         self.assertEqual(self.window.ab_path.text(), str(Path('C:/MIDI/song_AB.wav')))
         self.window.another()
         self.assertIsNone(self.window.ab_result)
@@ -190,16 +364,16 @@ class WindowsUITests(unittest.TestCase):
         self.assertFalse(self.window.audio_button.isHidden())
         self.assertFalse(self.window.options_widget.isHidden())
 
-    def test_warnings_accumulate_and_processor_disclosure_keeps_selection(self):
+    def test_warnings_accumulate_and_processor_settings_keep_selection(self):
         self.window.receive(dict(type='warning', message='Quantization unavailable'))
         self.window.receive(dict(type='warning', message='A/B unavailable'))
         self.assertIn('Quantization unavailable', self.window.warning.text())
         self.assertIn('A/B unavailable', self.window.warning.text())
-        self.assertTrue(self.window.device.isHidden())
-        self.window.processor_toggle.click()
-        self.assertFalse(self.window.device.isHidden())
-        self.window.processor_toggle.click()
-        self.assertTrue(self.window.device.isHidden())
+        self.assertTrue(self.window.info_dialog.isHidden())
+        self.window.show_app_info()
+        self.assertTrue(self.window.device.isVisible())
+        self.window.info_dialog.close()
+        self.assertTrue(self.window.info_dialog.isHidden())
         self.assertEqual(self.window.device.currentData(), 'auto')
 
     def test_windows_reveal_selects_file_without_shell(self):
@@ -230,6 +404,7 @@ class WindowsUITests(unittest.TestCase):
         try:
             output = Path(os.environ['MUSCRIPTOR_UI_PREVIEW_DIR'])
             output.mkdir(parents=True, exist_ok=True)
+            self.window.resources = Path(__file__).resolve().parents[1]
             for theme in ('dark', 'light'):
                 palette = QPalette(original)
                 palette.setColor(QPalette.Window, QColor('#1e2528' if theme == 'dark' else '#fafafa'))
@@ -239,7 +414,7 @@ class WindowsUITests(unittest.TestCase):
                 self.window.another()
                 self.window.selected_instruments = []
                 self.window.create_ab.setChecked(False)
-                self.window.processor_toggle.setChecked(False)
+                self.window.info_dialog.hide()
                 self.window.receive(dict(type='backend', device='NVIDIA CUDA', detail='NVIDIA GeForce RTX Example · 16 GB dedicated GPU memory', devices=[dict(id='cuda:0', backend='NVIDIA CUDA', name='NVIDIA GeForce RTX Example')]))
                 self.window.receive(dict(type='ready', cached=True, authenticated=True, directory='C:/Users/Example/.cache/huggingface/hub/models--MuScriptor--muscriptor-large', instruments=['acoustic_piano', 'electric_piano', 'chromatic_percussion', 'organ', 'guitar', 'bass', 'drums']))
                 self.window.show()
@@ -248,7 +423,7 @@ class WindowsUITests(unittest.TestCase):
                         self.window.add_instrument('acoustic_piano')
                         self.window.add_instrument('drums')
                         self.window.create_ab.setChecked(True)
-                        self.window.processor_toggle.setChecked(True)
+                        self.window.show_app_info()
                         self.window.source = Path('C:/Music/Example recording.wav')
                         self.window.destination = Path('C:/Music/Example recording_transcription.mid')
                         self.window.refresh()
@@ -269,6 +444,9 @@ class WindowsUITests(unittest.TestCase):
                     preview = QPixmap(content.size())
                     content.render(preview)
                     self.assertTrue(preview.save(str(output / f'{theme}-{state}.png')))
+                    if state == 'options':
+                        self.assertTrue(self.window.info_dialog.grab().save(str(output / f'{theme}-settings.png')))
+                        self.window.info_dialog.hide()
         finally:
             self.app.setPalette(original)
 

@@ -63,12 +63,12 @@ class MacOptionsTests(unittest.TestCase):
                 self.assertAlmostEqual(first_note.time - read_bar_offset(mido.MidiFile(result["path"])), 0.5, places=2)
                 self.assertEqual(result["quantized"], quantize)
                 self.assertIsNone(result["ab_path"])
-        self.engine.model.transcribe.assert_called_with(unittest.mock.ANY, instruments=None)
+        self.engine.model.transcribe.assert_called_with(unittest.mock.ANY, instruments=None, batch_size=1)
 
     def test_catalog_and_multiple_instruments_passed_to_official_api(self):
         self.assertEqual(worker.supported_instruments(), list(MT3_FULL_PLUS_GROUP_NAMES))
         self.run_transcription(instruments=["acoustic_piano", "drums", "acoustic_piano"])
-        self.assertEqual(self.engine.model.transcribe.call_args.kwargs, {"instruments": ["acoustic_piano", "drums"]})
+        self.assertEqual(self.engine.model.transcribe.call_args.kwargs, {"instruments": ["acoustic_piano", "drums"], "batch_size": 1})
         self.run_transcription(instruments=[])
         self.assertIsNone(self.engine.model.transcribe.call_args.kwargs["instruments"])
 
@@ -98,10 +98,11 @@ class MacOptionsTests(unittest.TestCase):
         self.engine.fallback = Mock(side_effect=lambda: setattr(self.engine, "device", "cpu"))
         self.run_transcription(instruments=["acoustic_piano"], quantize=True)
         self.engine.fallback.assert_called_once()
-        self.assertEqual([c.kwargs for c in self.engine.model.transcribe.call_args_list], [{"instruments": ["acoustic_piano"]}] * 2)
+        self.assertEqual([c.kwargs for c in self.engine.model.transcribe.call_args_list], [{"instruments": ["acoustic_piano"], "batch_size": 1}] * 2)
 
     def test_ab_uses_performance_midi_and_keeps_decoded_audio_alive(self):
-        def render(data, audio, output, soundfont):
+        def render(data, audio, output, soundfont, duration=None):
+            self.assertIsNone(duration)
             self.assertTrue(audio.is_file())
             self.assertTrue(output.is_file())
             grid = self.grid.with_onset_delay([ev.start_time for ev in self.events if isinstance(ev, NoteStartEvent)])

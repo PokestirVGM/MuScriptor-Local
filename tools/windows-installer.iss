@@ -1,8 +1,8 @@
 [Setup]
 AppId={{CA431D2A-667D-4B97-AEF5-FE2B0219C01B}
 AppName=MuScriptor Local
-AppVersion=1.0.0-beta.windows.4
-AppVerName=MuScriptor Local 1.0 Beta 4 for Windows
+AppVersion=1.0.0-rc.1
+AppVerName=MuScriptor Local 1.0 Release Candidate 1 for Windows
 SetupIconFile=..\assets\muscriptor.ico
 AppPublisher=MuScriptor Local contributors
 AppPublisherURL=https://github.com/PokestirVGM/MuScriptor-Local
@@ -13,7 +13,7 @@ ArchitecturesAllowed=x64compatible and not arm64
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir=..\dist\windows
-OutputBaseFilename=MuScriptor-Local-1.0-Beta-Windows-x64-Setup
+OutputBaseFilename=MuScriptor-Local-1.0-RC1-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

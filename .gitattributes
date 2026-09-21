@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Preserve unified-diff context markers and line endings across Mac and Windows.
+patches/*.patch text eol=lf whitespace=-blank-at-eol

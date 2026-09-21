@@ -3,7 +3,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Darwin
 
+struct ProcessorChoice: Identifiable { let id: String; let label: String }
+
 final class AppState: ObservableObject {
+    @Published var showingAppInfo = false
     @Published var busy = true
     @Published var setup = false
     @Published var authenticated = false
@@ -12,8 +15,14 @@ final class AppState: ObservableObject {
     @Published var error = ""
     @Published var filename = ""
     @Published var progress: Double? = nil
+    @Published var canFinish = false
+    @Published var finishing = false
+    @Published var completedSeconds = 0.0
+    private var transcriptionID: String?
     @Published var backend = "Checking backend"
     @Published var processorDetail = ""
+    @Published var processors: [ProcessorChoice] = []
+    @Published var selectedProcessor = UserDefaults.standard.string(forKey: "selectedProcessor") ?? "auto"
     @Published var result: URL? = nil
     @Published var token = ""
     @Published var needsSave = false
@@ -25,6 +34,108 @@ final class AppState: ObservableObject {
     @Published var instrumentGroups: [String] = []
     @Published var selectedInstruments: [String] = []
     @Published var quantizeMIDI = false
+    @Published var tempoMode = "auto"
+    @Published var tempoBPM = "120"
+    @Published var tempoMeter = "auto"
+    @Published var tempoUnit = "auto"
+    @Published var tempoDownbeat = "0"
+    @Published var tempoSubdivision = "auto"
+    @Published var tempoFactor = "1"
+    @Published var tempoAnchors = ""
+    @Published var tempoChanges = ""
+    @Published var timingSummary = ""
+    @Published var hasSession = false
+    @Published var recoveryPath: String? = nil
+    @Published var exportReadiness = "Check export requirements from the app menu."
+    @Published var fluidsynthReady = false
+    private var restoreAfterRestart: String? = nil
+    private var restoreLatestAfterRestart = false
+    private var pendingTiming: [String: Any]? = nil
+    @Published var savedTiming = ""
+    var timingKey: String { String(data: (try? JSONSerialization.data(withJSONObject: timingOptions, options: .sortedKeys)) ?? Data(), encoding: .utf8) ?? "" }
+    var hasUnsavedTiming: Bool { hasSession && savedTiming != timingKey }
+    var canCancel: Bool { busy && setupProcess == nil && worker != nil }
+    func confirmDiscardTiming() -> Bool {
+        guard hasUnsavedTiming else { return true }
+        let alert = NSAlert(); alert.messageText = "Discard unsaved timing changes?"
+        alert.informativeText = "Use Save Session or Apply & save new MIDI to keep these changes. The last applied session remains recoverable."
+        alert.addButton(withTitle: "Keep Editing"); alert.addButton(withTitle: "Discard Changes")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    func checkExports() {
+        guard !busy, webURL == nil else { return }
+        busy = true; send(["action": "capabilities"])
+    }
+    func finishTranscription() {
+        guard busy, canFinish, !finishing, let id = transcriptionID else { return }
+        finishing = true; canFinish = false
+        message = "Finishing completed sections and saving MIDI…"
+        send(["action": "finish_transcription", "run_id": id])
+    }
+
+    func cancelOperation() {
+        guard busy, setupProcess == nil, let process = worker else { return }
+        canFinish = false; finishing = false; transcriptionID = nil
+        restoreAfterRestart = hasSession ? recoveryPath : nil
+        pendingTiming = hasSession ? timingOptions : nil
+        worker = nil; input?.closeFile(); input = nil
+        if process.isRunning {
+            if killpg(process.processIdentifier, SIGKILL) != 0 { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
+        }
+        hasSession = false
+        started = false; endActivity(); busy = false; progress = nil; warning = "Operation cancelled. Your file and settings were kept."
+        start()
+    }
+    func openSession(path: String? = nil) {
+        guard !busy, webURL == nil else { return }
+        if let path = path {
+            if pendingTiming == nil && !confirmDiscardTiming() { return }
+            busy = true; error = ""; send(["action": "load_session", "path": path]); return
+        }
+        let panel = NSOpenPanel(); panel.title = "Open MuScriptor Session"
+        panel.allowedContentTypes = [UTType(filenameExtension: "muscriptor") ?? .data]
+        panel.allowsMultipleSelection = false
+        panel.begin { response in if response == .OK, let url = panel.url { self.openSession(path: url.path) } }
+    }
+    func saveSession() {
+        guard !busy, hasSession else { return }
+        let panel = NSSavePanel(); panel.title = "Save Session"
+        panel.nameFieldStringValue = (filename as NSString).deletingPathExtension + ".muscriptor"
+        panel.allowedContentTypes = [UTType(filenameExtension: "muscriptor") ?? .data]
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                self.busy = true; self.send(["action": "save_session", "path": url.path, "timing": self.timingOptions])
+            }
+        }
+    }
+    func applySession() {
+        guard !busy, hasSession else { return }
+        busy = true; warning = ""; error = ""; message = "Updating MIDI…"
+        var command: [String: Any] = ["action": "reexport_session", "timing": timingOptions]
+        if let destination = destination { command["destination"] = destination.path }
+        send(command)
+    }
+    func restoreTiming(_ t: [String: Any]) {
+        tempoMode = t["mode"] as? String ?? "auto"; tempoMeter = t["meter"] as? String ?? "auto"
+        tempoUnit = t["unit"] as? String ?? "auto"; quantizeMIDI = t["quantize"] as? Bool ?? false
+        tempoBPM = t["bpm"].map { String(describing: $0) } ?? "120"
+        tempoDownbeat = t["first_downbeat"].map { String(describing: $0) } ?? "0"
+        tempoSubdivision = t["subdivision"].map { String(describing: $0) } ?? "auto"
+        tempoFactor = String(format: "%g", Double(t["factor"].map { String(describing: $0) } ?? "1") ?? 1)
+        tempoAnchors = t["anchors"] as? String ?? (t["anchors"] as? [[Double]])?.map { "\($0[0]), \($0[1])" }.joined(separator: "\n") ?? ""; tempoChanges = t["meter_changes"] as? String ?? ""
+    }
+    var timingOptions: [String: Any] {
+        ["mode": tempoMode, "bpm": tempoBPM, "meter": tempoMeter, "unit": tempoUnit,
+         "first_downbeat": tempoDownbeat,
+         "quantize": quantizeMIDI, "subdivision": tempoSubdivision, "factor": tempoFactor,
+         "anchors": tempoAnchors, "meter_changes": tempoChanges]
+    }
+    func previewRhythm() {
+        busy = true; error = ""; message = "Preparing click preview…"
+        send(["action": "preview_rhythm", "timing": timingOptions])
+    }
     @Published var createAB = false
     @Published var soundfont: URL? = nil
     @Published var abResult: URL? = nil
@@ -54,12 +165,14 @@ final class AppState: ObservableObject {
         // A portable app update must also refresh an already-installed bridge.
         if Bundle.main.object(forInfoDictionaryKey: "MuScriptorRoot") == nil {
             do {
-                let bundledWorker = Bundle.main.resourceURL!.appendingPathComponent("engine/worker.py")
-                try Data(contentsOf: bundledWorker).write(to: root.appendingPathComponent("src/worker.py"), options: .atomic)
-                let bundledWeb = Bundle.main.resourceURL!.appendingPathComponent("engine/upstream/muscriptor/web_dist")
-                let installedWeb = root.appendingPathComponent("upstream/muscriptor/web_dist")
-                if FileManager.default.fileExists(atPath: installedWeb.path) { try FileManager.default.removeItem(at: installedWeb) }
-                try FileManager.default.copyItem(at: bundledWeb, to: installedWeb)
+                guard let resources = Bundle.main.resourceURL else { throw CocoaError(.fileNoSuchFile) }
+                let installer = Process()
+                installer.executableURL = python
+                installer.arguments = [resources.appendingPathComponent("engine_install.py").path, root.path,
+                    resources.appendingPathComponent("engine/worker.py").path,
+                    resources.appendingPathComponent("engine/upstream/muscriptor").path]
+                try installer.run(); installer.waitUntilExit()
+                if installer.terminationStatus != 0 { throw CocoaError(.fileWriteUnknown) }
             } catch {
                 started = false; busy = false
                 self.error = "The local engine couldn’t be updated. Use Repair Dependencies in the app menu."
@@ -68,7 +181,7 @@ final class AppState: ObservableObject {
         }
         let process = Process()
         process.executableURL = python
-        process.arguments = ["-u", root.appendingPathComponent("src/worker.py").path, "--model", selectedModel]
+        process.arguments = ["-u", root.appendingPathComponent("src/worker.py").path, "--model", selectedModel, "--device", selectedProcessor]
         process.currentDirectoryURL = root
         var env = ProcessInfo.processInfo.environment
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -98,6 +211,14 @@ final class AppState: ObservableObject {
                     self.endActivity()
                     self.busy = false
                     self.started = false
+                    if self.webURL != nil {
+                        self.restoreLatestAfterRestart = true
+                        self.restoreAfterRestart = nil; self.pendingTiming = nil
+                    } else {
+                        self.restoreAfterRestart = self.hasSession ? self.recoveryPath : nil
+                        self.pendingTiming = self.restoreAfterRestart != nil ? self.timingOptions : nil
+                    }
+                    self.hasSession = false
                     self.worker = nil
                     self.webURL = nil
                     if !self.repairing { self.error = "The transcription engine stopped. Click Try Again to restart it. Details are in the app’s logs." }
@@ -147,17 +268,41 @@ final class AppState: ObservableObject {
         case "backend":
             backend = event["device"] as? String ?? "CPU"
             processorDetail = event["detail"] as? String ?? ""
+            processors = (event["devices"] as? [[String: Any]] ?? []).compactMap { device in
+                guard let id = device["id"] as? String, let name = device["name"] as? String else { return nil }
+                let backend = device["backend"] as? String ?? ""
+                return ProcessorChoice(id: id, label: "\(backend) — \(name)")
+            }
+            selectedProcessor = event["requested_device"] as? String ?? "auto"
+            UserDefaults.standard.set(selectedProcessor, forKey: "selectedProcessor")
+        case "capabilities":
+            fluidsynthReady = event["fluidsynth"] as? Bool ?? false
+            let sheets = event["sheets"] as? Bool ?? false
+            exportReadiness = "MIDI: ready. Sheet music in Web GUI: " + (sheets ? "ready." : "install MuseScore 4+.") + " A/B audio: " + (fluidsynthReady ? "choose a local SF2 SoundFont." : "install FluidSynth and choose a local SF2 SoundFont.")
+            busy = false; message = ""
+        case "session_saved":
+            savedTiming = timingKey; busy = false; message = "Session saved."
+        case "session_loaded":
+            hasSession = true; source = nil; destination = nil; abResult = nil
+            filename = event["name"] as? String ?? "Recording"
+            if let timing = event["timing"] as? [String: Any] { restoreTiming(timing) }
         case "ready":
+            recoveryPath = event["recovery_path"] as? String
             instrumentGroups = event["instruments"] as? [String] ?? instrumentGroups
             authenticated = event["authenticated"] as? Bool ?? authenticated
             setup = !(event["cached"] as? Bool ?? false)
             cachedModels = event["models"] as? [String: Bool] ?? cachedModels
             modelDirectory = event["directory"] as? String ?? modelDirectory
             busy = false; progress = nil; message = ""; endActivity()
+            if restoreLatestAfterRestart {
+                restoreLatestAfterRestart = false; restoreAfterRestart = recoveryPath
+            }
+            if let path = restoreAfterRestart { restoreAfterRestart = nil; openSession(path: path) }
+            else if source != nil && destination == nil { planOutput() }
         case "planned":
             if let path = event["path"] as? String { destination = URL(fileURLWithPath: path) }
             busy = false; progress = nil; message = ""; endActivity()
-        case "status": message = event["message"] as? String ?? "Working…"; progress = nil
+        case "status": canFinish = false; message = event["message"] as? String ?? "Working…"; progress = nil
         case "authenticated": authenticated = true
         case "download":
             let total = event["total"] as? Double ?? 1
@@ -170,16 +315,30 @@ final class AppState: ObservableObject {
                 warning += warning.isEmpty ? notice : "\n\n" + notice
             }
         case "progress":
-            message = "Transcribing…"
+            canFinish = (event["can_finish"] as? Bool ?? false) && !finishing
+            completedSeconds = event["completed_seconds"] as? Double ?? 0
+            message = finishing ? "Finishing completed sections and saving MIDI…" : "Transcribing…"
             let total = event["total"] as? Double ?? 1
             progress = min(1, (event["completed"] as? Double ?? 0) / max(1, total))
+        case "rhythm_preview":
+            busy = false; progress = nil
+            timingSummary = event["message"] as? String ?? ""
+            if let path = event["path"] as? String { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
         case "complete":
+            canFinish = false; finishing = false; transcriptionID = nil
+            hasSession = event["session"] as? Bool ?? false
+            if hasSession { recoveryPath = event["recovery_path"] as? String }
+            timingSummary = event["timing_summary"] as? String ?? ""
             abResult = (event["ab_path"] as? String).map { URL(fileURLWithPath: $0) }
             if let path = event["path"] as? String { result = URL(fileURLWithPath: path); destination = result }
             needsSave = event["needs_save"] as? Bool ?? false
-            busy = false; setup = false; progress = nil; message = ""; endActivity()
+            busy = false; progress = nil; message = ""; endActivity()
+            savedTiming = timingKey
+            if let timing = pendingTiming { pendingTiming = nil; restoreTiming(timing) }
             if needsSave { save() }
         case "error":
+            pendingTiming = nil
+            canFinish = false; finishing = false; transcriptionID = nil
             busy = false; progress = nil; endActivity()
             error = event["message"] as? String ?? "MuScriptor couldn’t complete this operation."
             if event["code"] as? String == "auth" { setup = true; authenticated = false }
@@ -194,6 +353,12 @@ final class AppState: ObservableObject {
         guard !busy else { return }
         busy = true; error = ""; warning = ""; message = "Checking MuScriptor \(modelName)…"; beginActivity()
         send(["action": "prepare"])
+    }
+
+    func selectProcessor(_ processor: String) {
+        guard !busy, webURL == nil, processor != selectedProcessor else { return }
+        busy = true; error = ""; message = "Switching processor…"
+        send(["action": "select_device", "device": processor])
     }
 
     func selectModel(_ model: String) {
@@ -227,9 +392,9 @@ final class AppState: ObservableObject {
     }
 
     func convert(_ url: URL) {
-        guard !busy else { return }
+        guard !busy, confirmDiscardTiming() else { return }
         guard url.isFileURL else { error = "Choose an audio file stored on this Mac."; return }
-        source = url; destination = nil; result = nil; abResult = nil; filename = url.lastPathComponent
+        hasSession = false; timingSummary = ""; source = url; destination = nil; result = nil; abResult = nil; filename = url.lastPathComponent
         planOutput()
     }
 
@@ -260,9 +425,10 @@ final class AppState: ObservableObject {
         guard !busy, !setup, let source = source, let destination = destination else { return }
         result = nil; abResult = nil; error = ""; warning = ""; busy = true
         message = "Reading audio…"; progress = nil; beginActivity()
-        var command: [String: Any] = ["action": "transcribe", "path": source.path,
+        transcriptionID = UUID().uuidString; finishing = false; canFinish = false; completedSeconds = 0
+        var command: [String: Any] = ["action": "transcribe", "run_id": transcriptionID!, "path": source.path,
             "destination": destination.path, "instruments": selectedInstruments,
-            "quantize": quantizeMIDI, "create_ab": createAB]
+            "quantize": quantizeMIDI, "create_ab": createAB, "timing": timingOptions]
         if let soundfont = soundfont { command["soundfont"] = soundfont.path }
         send(command)
     }
@@ -299,7 +465,7 @@ final class AppState: ObservableObject {
     }
 
     func reveal() { if let result = result { NSWorkspace.shared.activateFileViewerSelecting([result]) } }
-    func another() { result = nil; abResult = nil; source = nil; destination = nil; filename = ""; error = ""; warning = ""; message = ""; needsSave = false }
+    func another() { guard confirmDiscardTiming() else { return }; hasSession = false; timingSummary = ""; result = nil; abResult = nil; source = nil; destination = nil; filename = ""; error = ""; warning = ""; message = ""; needsSave = false }
     func retry() {
         error = ""
         if worker == nil || !(worker?.isRunning ?? false) { started = false; start() }
@@ -316,25 +482,35 @@ final class AppState: ObservableObject {
                 // Include optional MuseScore/FluidSynth children of this worker.
                 if killpg(process.processIdentifier, SIGKILL) != 0 { kill(process.processIdentifier, SIGKILL) }
                 process.waitUntilExit()
-            } else { process.terminate() }
+            } else {
+                if killpg(process.processIdentifier, SIGKILL) != 0 { kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+            }
         }
         worker = nil; webURL = nil; started = false; endActivity()
     }
 
     func openWebGUI() {
         if let url = webURL { NSWorkspace.shared.open(url); return }
-        guard !busy, !setup else { return }
+        guard !busy, !setup, confirmDiscardTiming() else { return }
         busy = true; error = ""; message = "Opening the local web GUI…"; beginActivity()
         send(["action": "web_gui"])
     }
 
     func returnToDesktop() {
         guard webURL != nil else { return }
+        restoreLatestAfterRestart = true
+        restoreAfterRestart = nil; pendingTiming = nil; hasSession = false
         stop(); start()
     }
 
     func repair() {
         guard !busy else { return }
+        if hasSession {
+            restoreAfterRestart = recoveryPath
+            pendingTiming = recoveryPath != nil ? timingOptions : nil
+            hasSession = false
+        }
         repairing = true; stop(); busy = true; error = ""; message = "Repairing local dependencies…"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -367,8 +543,34 @@ final class AppState: ObservableObject {
 
 struct ContentView: View {
     @ObservedObject var state: AppState
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hovering = false
     @State private var instrumentSearch = ""
+    @State private var instrumentListHeight: CGFloat = 100
+    @State private var instrumentResizeStart: CGFloat?
+
+    private func timingEditor(_ title: String, text: Binding<String>, example: String, help: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: text)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(5)
+                    .accessibilityLabel(title)
+                if text.wrappedValue.isEmpty {
+                    Text(example).font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.tertiary).padding(.horizontal, 10).padding(.vertical, 7)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }.frame(height: 62)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
+            Text(help).font(.caption).foregroundStyle(.secondary)
+        }
+    }
 
     func instrumentLabel(_ name: String) -> String {
         name.replacingOccurrences(of: "_", with: " ").capitalized
@@ -376,6 +578,7 @@ struct ContentView: View {
 
     var transcriptionOptions: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if state.result == nil {
             Text("Instruments").font(.headline)
             Text("Leave empty to detect any supported instrument.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -389,6 +592,7 @@ struct ContentView: View {
                 }.padding(7).background(Color.accentColor.opacity(0.1)).cornerRadius(7)
             }
             TextField("Search instruments", text: $instrumentSearch).textFieldStyle(.roundedBorder)
+            VStack(spacing: 3) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     let matches = state.instrumentGroups.filter {
@@ -406,10 +610,113 @@ struct ContentView: View {
                         }.buttonStyle(.plain).padding(.vertical, 3)
                     }
                 }
-            }.frame(height: 100)
-            Toggle("Quantize MIDI for notation", isOn: $state.quantizeMIDI).toggleStyle(.checkbox)
-            Text("Off keeps performance timing. Both modes use upstream onset correction when a usable beat grid is detected.")
-                .font(.caption).foregroundStyle(.secondary)
+            }.frame(height: instrumentListHeight)
+                HStack {
+                    Spacer()
+                    Capsule().fill(Color.secondary.opacity(0.5)).frame(width: 32, height: 3)
+                    Spacer()
+                }.frame(height: 12).contentShape(Rectangle())
+                    .help("Drag to resize the instrument list")
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { value in
+                            if instrumentResizeStart == nil { instrumentResizeStart = instrumentListHeight }
+                            instrumentListHeight = min(320, max(80, (instrumentResizeStart ?? 100) + value.translation.height))
+                        }
+                        .onEnded { _ in instrumentResizeStart = nil })
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize instrument list")
+                    .accessibilityValue("\(Int(instrumentListHeight)) points")
+                    .accessibilityAdjustableAction { direction in
+                        switch direction {
+                        case .increment: instrumentListHeight = min(320, instrumentListHeight + 20)
+                        case .decrement: instrumentListHeight = max(80, instrumentListHeight - 20)
+                        @unknown default: break
+                        }
+                    }
+            }
+            }
+            Divider()
+            HStack(alignment: .bottom, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Tempo").font(.caption).foregroundStyle(.secondary)
+                    Picker("Tempo", selection: $state.tempoMode) {
+                        Text("Auto").tag("auto"); Text("Manual").tag("manual")
+                    }.labelsHidden().frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Time signature").font(.caption).foregroundStyle(.secondary)
+                    let meters = ["auto", "2/4", "3/4", "4/4", "6/8", "9/8", "12/8", "5/4", "7/8"]
+                    Picker("Time signature", selection: Binding(get: { meters.contains(state.tempoMeter) ? state.tempoMeter : "custom" }, set: { state.tempoMeter = $0 == "custom" ? "5/8" : $0 })) {
+                        ForEach(meters, id: \.self) { meter in Text(meter == "auto" ? "Auto" : meter).tag(meter) }
+                        Text("Custom…").tag("custom")
+                    }.labelsHidden().frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                }
+                Toggle("Strict quantization", isOn: $state.quantizeMIDI)
+                    .toggleStyle(.checkbox).fixedSize(horizontal: true, vertical: false)
+            }
+            if !["auto", "2/4", "3/4", "4/4", "6/8", "9/8", "12/8", "5/4", "7/8"].contains(state.tempoMeter) {
+                TextField("Custom time signature", text: $state.tempoMeter).textFieldStyle(.roundedBorder)
+            }
+            if state.tempoMode == "manual" {
+                HStack {
+                    Text("BPM"); TextField("BPM", text: $state.tempoBPM).textFieldStyle(.roundedBorder).frame(width: 65)
+                    Text("Sets the grid; playback stays at the original speed.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if state.quantizeMIDI {
+                Text("Snaps note starts and ends to the grid. Check the click first: an incorrect grid can make rhythm worse. Turn off to restore original timing.").font(.caption).foregroundStyle(.secondary)
+                Picker("Snap to", selection: $state.tempoSubdivision) {
+                    Text("Auto").tag("auto"); Text("Eighth notes").tag("2")
+                    Text("Sixteenth notes").tag("4"); Text("Eighth-note triplets").tag("3")
+                }
+            }
+            DisclosureGroup("Advanced timing") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Tempo sets the grid without changing playback speed. Quantization moves notes.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("BPM beat unit").font(.caption).foregroundStyle(.secondary)
+                            Picker("BPM beat unit", selection: $state.tempoUnit) {
+                                Text("From time signature").tag("auto"); Text("Quarter note").tag("quarter")
+                                Text("Dotted quarter").tag("dotted-quarter"); Text("Eighth note").tag("eighth")
+                            }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Detected pulse").font(.caption).foregroundStyle(.secondary)
+                            Picker("Detected pulse", selection: $state.tempoFactor) {
+                                Text("Normal").tag("1"); Text("Half tempo").tag("0.5"); Text("Double tempo").tag("2")
+                            }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    Text("6/8 usually counts dotted-quarter beats. Check Auto’s meter suggestions; enter corrections below.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if state.tempoMode == "manual" {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("First downbeat (seconds)").font(.caption).foregroundStyle(.secondary)
+                            TextField("Seconds", text: $state.tempoDownbeat).textFieldStyle(.roundedBorder).frame(width: 100)
+                        }
+                    }
+                    timingEditor("Beat anchors", text: $state.tempoAnchors, example: "0.5, 1\n2.5, 5",
+                                 help: "Seconds, beat number. Use at least two anchors; beat 1 is the first downbeat.")
+                    timingEditor("Time-signature changes", text: $state.tempoChanges, example: "9, 3/4",
+                                 help: "Bar number, signature. Bar 1 starts at the first downbeat.")
+                }.padding(.top, 8).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !state.timingSummary.isEmpty { Text(state.timingSummary).font(.caption).textSelection(.enabled) }
+            if state.result != nil {
+                HStack {
+                    Button("Apply & save new MIDI") { state.applySession() }
+                    Button("Save Session…") { state.saveSession() }
+                    Button("Preview click") { state.previewRhythm() }
+                }
+            }
+            if state.exportReadiness != "Check export requirements from the app menu." {
+                Text(state.exportReadiness).font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Create A/B audio render", isOn: $state.createAB).toggleStyle(.checkbox)
             if state.createAB {
                 Text("Original audio on the left; performance-timing MIDI synthesis on the right. Requires FluidSynth and a local SF2 SoundFont.")
@@ -431,12 +738,50 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HStack {
-                    Text("AUDIO → MIDI").font(.system(size: 25, weight: .semibold, design: .rounded))
-                    Spacer()
-                    Button("Open Web GUI") { state.openWebGUI() }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
-                        .disabled(state.busy || state.setup)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        if let logoURL = Bundle.main.url(forResource: "muscriptor-header-\(colorScheme == .dark ? "dark" : "light")", withExtension: "png"),
+                           let logo = NSImage(contentsOf: logoURL) {
+                            Image(nsImage: logo).resizable().scaledToFit().frame(width: 76, height: 48)
+                                .accessibilityHidden(true)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("MuScriptor").font(.system(size: 29, weight: .semibold))
+                            Text("Independent adaptation by Pokestir").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        Button { state.openWebGUI() } label: { HStack(spacing: 4) { Text("Open Web GUI"); Image(systemName: "arrow.up.right") } }
+                            .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.caption)
+                            .disabled(state.busy || state.setup)
+                        Menu {
+                            Button("Open Session…") { state.openSession() }
+                                .disabled(state.busy || state.webURL != nil)
+                            Button("Recover Last Session") {
+                                if let path = state.recoveryPath { state.openSession(path: path) }
+                            }.disabled(state.busy || state.webURL != nil || state.recoveryPath == nil)
+                            if state.hasSession {
+                                Button("Save Session…") { state.saveSession() }.disabled(state.busy || state.webURL != nil)
+                            }
+                            Divider()
+                            Picker("Processor", selection: Binding(get: { state.selectedProcessor }, set: { state.selectProcessor($0) })) {
+                                Text("Automatic").tag("auto")
+                                ForEach(state.processors) { processor in Text(processor.label).tag(processor.id) }
+                            }.disabled(state.busy || state.webURL != nil)
+                            Button("App Information…") { state.showingAppInfo = true }
+                            Button("Open Model Folder") {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: state.modelDirectory))
+                            }.disabled(state.modelDirectory.isEmpty)
+                            Divider()
+                            Button("Check Export Requirements") { state.checkExports() }.disabled(state.busy || state.webURL != nil)
+                            Button("Repair Dependencies…") { state.repair() }.disabled(state.busy || state.webURL != nil)
+                            Button("Show Logs") { NSWorkspace.shared.open(state.logs) }
+                        } label: {
+                            Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 24, height: 24)
+                        }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                            .help("Sessions and app options").accessibilityLabel("Sessions and app options")
+                    }
+                    Text("Local audio-to-MIDI, with tempo and time-signature controls, optional quantization, and reusable sessions. Open the web GUI for sheet music and audio/MIDI preview.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -527,7 +872,21 @@ struct ContentView: View {
                     }
                 }
 
-                if !state.setup && state.result == nil && state.webURL == nil { transcriptionOptions }
+                if state.canCancel && state.webURL == nil {
+                    HStack {
+                        if state.canFinish || state.finishing {
+                            Button(state.finishing ? "Finishing…" : "Finish here & save MIDI") { state.finishTranscription() }
+                                .disabled(state.finishing)
+                                .help("Saves fully completed 5-second sections. The unfinished section is omitted.")
+                        }
+                        Button("Cancel operation") { state.cancelOperation() }
+                    }
+                    if state.canFinish {
+                        Text(String(format: "%.0f seconds completed. Finish here keeps these sections and skips the rest.", state.completedSeconds))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if (!state.setup || state.hasSession) && state.webURL == nil { transcriptionOptions }
 
                 if let abResult = state.abResult, state.webURL == nil {
                     VStack(alignment: .leading, spacing: 8) {
@@ -567,20 +926,8 @@ struct ContentView: View {
                     }
                 }
                 if !state.warning.isEmpty { Text(state.warning).font(.caption).foregroundStyle(.orange) }
-                Divider()
-                if !state.modelDirectory.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Model download folder").font(.caption).fontWeight(.medium)
-                        pathLabel(state.modelDirectory)
-                    }
-                }
-                Text("MuScriptor \(state.modelName) • \(state.backend) • Audio stays on this Mac")
-                    .font(.caption).foregroundStyle(.secondary)
-                if !state.processorDetail.isEmpty {
-                    Text(state.processorDetail).font(.caption).foregroundStyle(.secondary)
-                }
             }.padding(28)
-        }.frame(width: 560, height: 730)
+        }.frame(minWidth: 560, minHeight: 560, maxHeight: .infinity)
         .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
             guard !state.busy, state.webURL == nil, let provider = providers.first else { return false }
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -591,40 +938,141 @@ struct ContentView: View {
             }
             return true
         }
+        .sheet(isPresented: $state.showingAppInfo) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("MuScriptor").font(.title2).fontWeight(.semibold)
+                    Spacer()
+                    Button("Done") { state.showingAppInfo = false }.keyboardShortcut(.defaultAction)
+                }
+                Text("Independent adaptation by Pokestir").foregroundStyle(.secondary)
+                Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleGetInfoString") as? String ?? "Version unavailable") · Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")").font(.caption)
+                Divider()
+                Text("Model: \(state.modelName) · \(state.cachedModels[state.selectedModel] == true ? "Downloaded" : "Download required")")
+                Text("Processor: \(state.backend)")
+                Picker("Use processor", selection: Binding(get: { state.selectedProcessor }, set: { state.selectProcessor($0) })) {
+                    Text("Automatic").tag("auto")
+                    ForEach(state.processors) { processor in Text(processor.label).tag(processor.id) }
+                }.disabled(state.busy || state.webURL != nil)
+                Text(state.processorDetail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                Text("Model download folder").font(.caption).foregroundStyle(.secondary)
+                pathLabel(state.modelDirectory.isEmpty ? "Available after the model is checked." : state.modelDirectory)
+                Button("Open Model Folder") { NSWorkspace.shared.open(URL(fileURLWithPath: state.modelDirectory)) }.disabled(state.modelDirectory.isEmpty)
+                Divider()
+                Text("Audio is processed on this computer. Original MuScriptor by Kyutai and Mirelo.").font(.caption).foregroundStyle(.secondary)
+            }.padding(24).frame(width: 440)
+        }
         .onAppear { state.start() }
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
     let state = AppState()
     var window: NSWindow!
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu()
-        let main = NSMenuItem(); let submenu = NSMenu()
-        submenu.addItem(withTitle: "About MuScriptor Local", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        submenu.addItem(.separator())
-        let repair = submenu.addItem(withTitle: "Repair Dependencies…", action: #selector(repairDependencies), keyEquivalent: "")
-        repair.target = self
-        let logs = submenu.addItem(withTitle: "Show Logs", action: #selector(showLogs), keyEquivalent: "")
-        logs.target = self
-        submenu.addItem(.separator())
-        submenu.addItem(withTitle: "Quit MuScriptor Local", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        main.submenu = submenu; menu.addItem(main)
-        let editItem = NSMenuItem(); let edit = NSMenu(title: "Edit")
+        func section(_ title: String) -> NSMenu {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: title); item.submenu = submenu; menu.addItem(item)
+            return submenu
+        }
+        func action(_ title: String, _ selector: Selector, _ key: String = "", in submenu: NSMenu,
+                    modifiers: NSEvent.ModifierFlags = .command) {
+            let item = submenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
+            item.target = self; item.keyEquivalentModifierMask = modifiers
+        }
+        let appMenu = section("MuScriptor")
+        action("About MuScriptor", #selector(showAppInfo), in: appMenu)
+        action("Settings…", #selector(showAppInfo), ",", in: appMenu)
+        appMenu.addItem(.separator())
+        action("Repair Dependencies…", #selector(repairDependencies), in: appMenu)
+        action("Show Logs", #selector(showLogs), in: appMenu)
+        appMenu.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        let servicesItem = appMenu.addItem(withTitle: "Services", action: nil, keyEquivalent: "")
+        servicesItem.submenu = services; NSApp.servicesMenu = services
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide MuScriptor", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit MuScriptor", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let file = section("File")
+        action("Open Audio…", #selector(openAudio), "o", in: file)
+        action("Open Session…", #selector(openSession), "o", in: file, modifiers: [.command, .shift])
+        action("Recover Last Session", #selector(recoverSession), in: file)
+        file.addItem(.separator())
+        action("Save Session…", #selector(saveSession), "s", in: file)
+        action("Save MIDI Copy…", #selector(saveMIDI), "s", in: file, modifiers: [.command, .shift])
+        action("Reveal MIDI in Finder", #selector(revealMIDI), in: file)
+        file.addItem(.separator())
+        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let edit = section("Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit; menu.addItem(editItem); NSApp.mainMenu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "MuScriptor Local"
+        let view = section("View")
+        action("Open Web GUI ↗", #selector(openWeb), in: view)
+        action("Return to Desktop", #selector(returnToDesktop), in: view)
+        action("Open Model Folder", #selector(openModelFolder), in: view)
+        let windows = section("Window")
+        windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windows.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windows.addItem(.separator())
+        windows.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        NSApp.windowsMenu = windows
+        let help = section("Help")
+        action("MuScriptor Help", #selector(openHelp), in: help)
+        action("Check Export Requirements", #selector(checkExports), in: help)
+        action("Report an Issue…", #selector(reportIssue), in: help)
+        NSApp.helpMenu = help; NSApp.mainMenu = menu
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.contentMinSize = NSSize(width: 560, height: 560)
+        window.setFrameAutosaveName("MuScriptorMainWindow")
+        window.title = "MuScriptor Local — 1.0 Release Candidate"
         window.contentView = NSHostingView(rootView: ContentView(state: state))
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc func showAppInfo() { window.makeKeyAndOrderFront(nil); state.showingAppInfo = true }
+    @objc func openAudio() { state.choose() }
+    @objc func openSession() { state.openSession() }
+    @objc func recoverSession() { if let path = state.recoveryPath { state.openSession(path: path) } }
+    @objc func saveSession() { state.saveSession() }
+    @objc func saveMIDI() { state.save() }
+    @objc func revealMIDI() { state.reveal() }
+    @objc func openWeb() { state.openWebGUI() }
+    @objc func returnToDesktop() { state.returnToDesktop() }
+    @objc func openModelFolder() { NSWorkspace.shared.open(URL(fileURLWithPath: state.modelDirectory)) }
+    @objc func checkExports() { state.checkExports() }
+    @objc func openHelp() { NSWorkspace.shared.open(URL(string: "https://github.com/PokestirVGM/MuScriptor-Local#readme")!) }
+    @objc func reportIssue() { NSWorkspace.shared.open(URL(string: "https://github.com/PokestirVGM/MuScriptor-Local/issues")!) }
+    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        let idle = !state.busy && state.webURL == nil && window.attachedSheet == nil
+        switch item.action {
+        case #selector(openAudio): return idle && !state.setup
+        case #selector(openSession), #selector(repairDependencies), #selector(checkExports): return idle
+        case #selector(recoverSession): return idle && state.recoveryPath != nil
+        case #selector(saveSession): return idle && state.hasSession
+        case #selector(saveMIDI): return idle && state.result != nil
+        case #selector(revealMIDI): return state.result != nil
+        case #selector(openWeb): return !state.busy && !state.setup && window.attachedSheet == nil
+        case #selector(returnToDesktop): return state.webURL != nil && window.attachedSheet == nil
+        case #selector(openModelFolder): return !state.modelDirectory.isEmpty
+        case #selector(showAppInfo): return window.attachedSheet == nil
+        default: return true
+        }
     }
     @objc func repairDependencies() { state.repair() }
     @objc func showLogs() { NSWorkspace.shared.open(state.logs) }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { state.confirmDiscardTiming() ? .terminateNow : .terminateCancel }
     func applicationWillTerminate(_ notification: Notification) { state.stop() }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil); return true
