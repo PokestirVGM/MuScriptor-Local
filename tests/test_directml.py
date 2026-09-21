@@ -62,6 +62,41 @@ class DirectMLTests(unittest.TestCase):
         self.assertEqual(set(result), {"self_wav", "instrument_group", "dataset_name"})
         self.assertTrue(all(t.device.type == "meta" for pair in result.values() for t in pair))
 
+    def test_generation_avoids_inference_tensors_and_preserves_tokens(self):
+        model = self.tiny_model()
+        decoder = model._model
+        original_method = type(decoder).generate
+        args = dict(max_gen_len=4, use_sampling=False, cfg_coef=1.0)
+        expected = [token.clone() for token in decoder.generate(**args)]
+        worker.move_transcription_to_directml(model, torch.device('cpu'))
+        observed = []
+        def check_projection(module, inputs):
+            observed.append(True)
+            self.assertFalse(torch.is_inference_mode_enabled())
+            self.assertFalse(torch.is_grad_enabled())
+            self.assertFalse(torch.is_inference(inputs[0]))
+        hook = decoder.transformer.layers[0].self_attn.register_forward_pre_hook(check_projection)
+        try:
+            stream = decoder.generate(**args)
+            actual = []
+            for token in stream:
+                self.assertTrue(torch.is_grad_enabled())
+                self.assertFalse(torch.is_inference_mode_enabled())
+                actual.append(token.clone())
+            self.assertTrue(observed)
+            self.assertEqual(len(actual), 4)
+            for got, wanted in zip(actual, expected):
+                torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+            with torch.inference_mode():
+                nested = decoder.generate(**args)
+                next(nested)
+                self.assertTrue(torch.is_inference_mode_enabled())
+                nested.close()
+                self.assertTrue(torch.is_inference_mode_enabled())
+        finally:
+            hook.remove()
+        self.assertIs(type(decoder).generate, original_method)
+
     def test_automatic_prefers_discrete_radeon_over_integrated_adapter(self):
         devices = [dict(id="privateuseone:0", default=True, discrete=False),
                    dict(id="privateuseone:1", default=False, discrete=True), dict(id="cpu")]

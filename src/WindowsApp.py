@@ -155,6 +155,9 @@ class MainWindow(QMainWindow):
         self.frozen = getattr(sys, "frozen", False)
         self.root = Path(root) if root else (self.support / "Engine" if self.frozen else Path(__file__).resolve().parents[1])
         self.resources = Path(sys._MEIPASS) / "resources" if self.frozen else self.root
+        icon = self.resources / "assets/muscriptor.ico"
+        if icon.is_file():
+            self.setWindowIcon(QIcon(str(icon)))
         self.python = self.root / (".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python")
         self.worker = None
         self.installer = None

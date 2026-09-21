@@ -272,7 +272,8 @@ def device_error(exc, device):
             word in str(exc).lower() for word in (
                 "directml", "privateuseone", "privateuse1", "dml", "out of memory",
                 "not enough memory", "gpu video memory", "unsupported data type",
-                "80070057", "8007000e", "device removed"))
+                "80070057", "8007000e", "device removed",
+                "cannot set version_counter for inference tensor"))
     return device.startswith("cuda") and isinstance(exc, (RuntimeError, NotImplementedError)) and any(
         word in str(exc).lower() for word in ("cuda", "cublas", "cudnn", "no kernel image", "out of memory"))
 
@@ -320,6 +321,17 @@ def move_transcription_to_directml(model, device):
     device attributes; only their small completed outputs cross to DirectML.
     No global torch patches or changes to the vendored engine are needed.
     """
+    import torch
+    from types import MethodType
+
+    # The pinned upstream generator uses inference_mode. DirectML 0.2.5
+    # cannot update version counters for its inference tensors during linear
+    # projection. Replace that decorator on this instance only, preserving
+    # no-gradient execution and context restoration at every generator yield.
+    generate = type(model._model).generate.__wrapped__
+    generate = torch.inference_mode(False)(torch.no_grad()(generate))
+    model._model.generate = MethodType(generate, model._model)
+
     for name, module in model._model.named_children():
         if name != "condition_provider":
             module.to(device)

@@ -1,5 +1,13 @@
 # Changelog
 
+## Windows Beta 4 candidate — DirectML inference fix and app icons
+
+- Fix the reported DirectML `Cannot set version_counter for inference tensor` failure by replacing upstream's inference-mode generator decorator with no-gradient execution on DirectML model instances only. Desktop and web transcription share this correction.
+- Recognize that DirectML error for desktop CPU recovery if it occurs elsewhere.
+- Draw readable circle-plus instrument buttons independently of Windows font glyphs.
+- Use the official upstream MuScriptor mark for Windows executable/setup/window icons and the next macOS app bundle. Existing macOS releases remain unchanged.
+- AMD support remains experimental; the corrected build needs retesting on the RX 6800 XT.
+
 ## 1.0 Beta 3 for Windows — 2026-09-21
 
 - Add experimental DirectML setup for AMD graphics, including the RX 6800 XT; existing installations use Repair Dependencies in an updated app build.

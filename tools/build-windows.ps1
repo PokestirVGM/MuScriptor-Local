@@ -11,7 +11,8 @@ python tools/build-web.py
 if ($LASTEXITCODE -ne 0) { throw 'Could not bundle the official web GUI.' }
 python -m pip install -r requirements-windows-ui.txt
 if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --icon "$PWD/assets/muscriptor.ico" --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
+    --add-data "$PWD/assets/muscriptor.ico;resources/assets" `
     --add-data "$PWD/src/worker.py;resources/src" `
     --add-data "$PWD/tools/bootstrap-windows.ps1;resources/tools" `
     --add-data "$PWD/requirements-windows.txt;resources" `
@@ -25,7 +26,7 @@ python tools/collect-windows-licenses.py 'build/windows/dist/MuScriptor Local/Le
 if ($LASTEXITCODE -ne 0) { throw 'Could not collect required license notices.' }
 New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
 Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Portable.zip' -Force
-Write-Output 'Built the Windows 1.0 Beta 3 portable archive.'
+Write-Output 'Built the Windows 1.0 Beta 4 portable archive.'
 
 $compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (!$compiler) {
