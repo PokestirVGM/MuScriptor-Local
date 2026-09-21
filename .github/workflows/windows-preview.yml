@@ -29,13 +29,13 @@ jobs:
       - name: Test desktop states without model downloads
         shell: pwsh
         env:
-          QT_QPA_PLATFORM: offscreen
+          QT_QPA_PLATFORM: windows
           MUSCRIPTOR_UI_PREVIEW_DIR: validation/ui-previews
         run: python -m unittest discover -s tests -p test_windows_ui.py -v
       - name: Check desktop layout at 150 percent scaling
         shell: pwsh
         env:
-          QT_QPA_PLATFORM: offscreen
+          QT_QPA_PLATFORM: windows
           QT_SCALE_FACTOR: '1.5'
         run: python -m unittest discover -s tests -p test_windows_ui.py -v
       - uses: actions/upload-artifact@v4

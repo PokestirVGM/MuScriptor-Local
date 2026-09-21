@@ -12,7 +12,7 @@ A/B audio has original audio on the left and performance-timing MIDI synthesis o
 
 **Processor settings**, below the hardware details, expands the Windows-specific Automatic/GPU/CPU selector. The actual backend and hardware remain visible when it is collapsed. Model selection, local processing, download progress, safe output naming, repair, and process cleanup retain the existing Windows behavior.
 
-Headless Qt tests cover the controls, state transitions, and long paths at the minimum window size. Windows builds also run these tests at 150% scaling and provide a **Windows-UI-Previews** artifact showing light and dark ready, options, completion, setup, and download states. Native title bars, Explorer selection, actual display scaling, and GPU/transcription with these new options still need verification on a Windows PC. Follow [the Windows handoff](WINDOWS_HANDOFF.md): build the installer, let the user try it, and obtain their explicit approval before publishing a new beta.
+Qt tests cover the controls, state transitions, and long paths at the minimum window size. Windows builds use Qt's Windows platform plugin so previews include real system fonts, run these tests at 150% scaling, and provide a **Windows-UI-Previews** artifact showing light and dark ready, options, completion, setup, and download states. Native title bars, Explorer selection, actual display scaling, and GPU/transcription with these new options still need verification on a Windows PC. Follow [the Windows handoff](WINDOWS_HANDOFF.md): build the installer, let the user try it, and obtain their explicit approval before publishing a new beta.
 
 ## Install
 

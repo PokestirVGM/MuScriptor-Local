@@ -526,6 +526,7 @@ class MainWindow(QMainWindow):
         self.selected_widget.setVisible(bool(self.selected_instruments))
         for name in self.selected_instruments:
             button = QPushButton()
+            button.setMinimumHeight(30)
             button.setObjectName("selected")
             button.setAccessibleName("Remove " + name.replace("_", " "))
             row = QHBoxLayout(button)

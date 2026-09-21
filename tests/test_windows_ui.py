@@ -1,8 +1,8 @@
-"""Headless interface tests: no downloads, real credentials, or GPU are needed."""
+"""Interface tests: no downloads, real credentials, or GPU are needed."""
 import os
-os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from pathlib import Path
 import sys
+os.environ.setdefault('QT_QPA_PLATFORM', 'windows' if sys.platform == 'win32' else 'offscreen')
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -167,6 +167,7 @@ class WindowsUITests(unittest.TestCase):
         self.app.processEvents()
         self.assertLessEqual(self.window.centralWidget().widget().width(), self.window.centralWidget().viewport().width())
         self.assertGreaterEqual(self.window.instrument_search.height(), self.window.instrument_search.fontMetrics().height() + 6)
+        self.assertTrue(self.window.instrument_search.fontMetrics().inFont('A'), 'Preview fonts must render real text')
         content = self.window.centralWidget().widget()
         self.assertLessEqual(content.height(), max(self.window.centralWidget().viewport().height(), content.heightForWidth(content.width())) + 2)
 
@@ -208,6 +209,9 @@ class WindowsUITests(unittest.TestCase):
                         self.window.receive(dict(type='download', completed=1200000000, total=2000000000, directory='C:/Users/Example/.cache/huggingface/hub/models--MuScriptor--muscriptor-large'))
                     self.app.processEvents()
                     self.app.processEvents()
+                    for index in range(self.window.selected_layout.count()):
+                        row = self.window.selected_layout.itemAt(index).widget()
+                        self.assertGreaterEqual(row.height(), row.layout().sizeHint().height())
                     content = self.window.centralWidget().widget()
                     preview = QPixmap(content.size())
                     content.render(preview)
