@@ -19,6 +19,8 @@ For a new chat on another computer:
 
 ## Validate before the next Windows release
 
+The Windows Beta 2 candidate uses installer version `1.0.0-beta.windows.2`. See [the candidate validation record](validation/WINDOWS_BETA_2.md) for the current physical-PC checks and remaining owner acceptance. Source changes are on main; publication is still held for the owner's explicit approval after trying the installer. Do not treat the approval for the older Windows Beta 1 as approval for Beta 2.
+
 Use WINDOWS.md for build/setup instructions and validation/WINDOWS_RESULTS.md for the scope of the earlier physical-PC checks. Those older results do not prove the newly added options have been tested on Windows hardware.
 
 Check installation/upgrade, actual CUDA device use, the current UI at Windows display scaling, instrument filtering, quantization, FluidSynth/SoundFont A/B rendering, custom output paths, collisions, and offline startup. Confirm failed optional rendering preserves the MIDI. Review the release archive for credentials and local paths. Give the user the built installer to run, then wait for their feedback and ask for explicit approval to publish. Passing automated tests does not authorize publication. After approval, update validation notes and use a new Windows tag so existing release tags remain intact.

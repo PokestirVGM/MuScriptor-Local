@@ -72,7 +72,7 @@ Close the app before upgrading through the installer. Closing during work cancel
 - Small and Medium transcription, other GPUs, Windows 10, and the full upgrade/uninstall preservation cycle were not independently validated on this PC.
 - Offline CUDA transcription was not separately completed in this validation session.
 - Transcription is approximate and may require musical editing. CPU mode is slower.
-- Downloads contain no model weights, credentials, recordings, MIDI results, or private logs. Component notices are in **Legal**.
+- Downloads contain no model weights, credentials, personal recordings, MIDI results, or private logs. The official web GUI includes its two unchanged public example audio clips. Component notices are in **Legal**.
 
 The [macOS Beta 3 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3) remains available. Windows Beta 2 is a separate candidate; it is not published until the owner has installed it, tried it, and explicitly approved publication.
 
