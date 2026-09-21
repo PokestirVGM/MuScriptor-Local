@@ -63,7 +63,7 @@ By default, MIDI is not quantized and the optional tempo helper is used only whe
 
 **Try Again** repairs incomplete engine setup. **App → Repair Dependencies** repeats automatic engine setup. **App → Show Logs** opens local diagnostics; redact personal paths before sharing any log excerpts.
 
-Close the app before upgrading through the installer. Closing during work cancels the active operation; completed MIDI remains intact and model downloads can resume. Uninstall removes the app and shortcuts while retaining engine files, shared model caches, credentials, settings, and MIDI. Remove retained data separately only if you no longer need it.
+Close the app before upgrading through the installer. Closing during work cancels the active operation; completed MIDI remains intact. Retry interrupted model downloads in the app; the current Hugging Face client may restart an interrupted file, so allow time and disk space for another full download. Uninstall removes the app and shortcuts while retaining engine files, shared model caches, credentials, settings, and MIDI. Remove retained data separately only if you no longer need it.
 
 ## Beta scope
 
