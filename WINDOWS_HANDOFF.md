@@ -1,5 +1,9 @@
 # Continuing development on Windows
 
+## Windows Beta 4 candidate
+
+Source `07e1e47` fixes the reported DirectML inference-tensor crash, attention-cache updates, and waveform preparation, and includes the official app icon for both platforms plus drawn Windows instrument-add icons. See [DirectML validation](validation/WINDOWS_DIRECTML.md) for successful full Large-model transcription on integrated AMD graphics and NVIDIA through DirectML, and the local web GUI check. RX 6800 XT retesting remains necessary. This is a candidate for user testing, not a published release; keep AMD support experimental and preserve all existing macOS releases. Install the candidate and choose App → Repair Dependencies before retesting.
+
 ## Windows Beta 3 release
 
 The owner explicitly authorized building, pushing, and publishing Windows Beta 3 (`v1.0.0-beta.windows.3`) with experimental AMD DirectML support. No further confirmation is required for this release. RX 6800 XT hardware transcription remains untested; do not claim hardware validation. Existing users must choose **App → Repair Dependencies** after upgrading. Preserve all macOS releases. The older Beta 2 approval and build references below are historical.

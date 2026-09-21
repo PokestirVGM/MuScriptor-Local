@@ -2,6 +2,22 @@
 
 Target: Windows 10/11 x64, AMD Radeon RX 6800 XT. Windows Beta 3 includes this experimental implementation. Windows Beta 2 and all macOS releases remain unchanged.
 
+## Windows Beta 4 candidate — physical DirectML regression checks
+
+The RX 6800 XT report showed successful dependency repair and model loading, followed by `Cannot set version_counter for inference tensor` in both desktop and web generation. The candidate removes inference mode on DirectML instances. Further physical tests exposed nested cache writes and waveform collation producing incorrect output; the adapter now rebuilds the used attention cache and keeps waveform preparation on CPU.
+
+- Build source: `07e1e47`; [Windows workflow](https://github.com/PokestirVGM/MuScriptor-Local/actions/runs/35564941160).
+- The workflow passed executable/installer startup, normal and 150% UI checks, fresh CPU setup/tests, and pinned DirectML setup/tests. Downloaded installer and portable packages passed the private-content audit and matched the source. Installer SHA-256: `eb7fa8294971ac9877278a688e41e465319565a02075a336dbfba41854de4072`; portable SHA-256: `74bdbe2d26a89b29683e065a161f69c907fdcafb2f02e7d7f28963faf6ef850b`. The owner requested the EXE for testing and explicitly instructed not to publish yet.
+- Tested the actual pinned torch 2.4.1 / torch-directml 0.2.5.dev240914 environment in an isolated runtime, preserving the installed CUDA environment.
+- All 12 adapter tests passed, including opt-in real-device comparison of eight generated tokens against CPU on both NVIDIA RTX 5070 Ti and integrated AMD Radeon graphics. Cache tests also exercise beam reordering.
+- Large completed the generated 12-second melody using DirectML on NVIDIA: 20 notes, about 11.23 seconds of MIDI, 11.47 seconds including model loading. This is a functional check, not a general speed benchmark.
+- Large completed the same melody on the integrated AMD Radeon GPU: 20 notes, 11.23 seconds of MIDI, 65.5 seconds including loading. The validation rejected complete CPU fallback. An individual `aten::amin.out` operation fell back to CPU, as reported by DirectML.
+- Local official web GUI integration passed with the cached Large model and DirectML selected: three chunks, 20 notes, acoustic-piano filter, successful return to desktop, and server termination when quitting. Hugging Face offline mode was enabled; only the loopback HTTP server was used for the web check.
+- 24 worker tests and 12 transcription-option tests passed on the pinned runtime; the earlier UI/web unit checks passed as well.
+- Official upstream waveform-and-note assets are wired into Windows executable, setup and window icons, and the next macOS bundle. ICO and ICNS decode correctly; a native macOS build was not run on Windows. Existing macOS downloads are unchanged.
+
+These results do **not** validate the RX 6800 XT. Support remains experimental; install the candidate and test desktop and web transcription on that machine before claiming the reported hardware issue resolved. Choose **App → Repair Dependencies** after upgrading. No private audio, credentials, personal paths, or raw local logs are included in this record.
+
 ## Windows Beta 3 validation — 2026-09-21
 
 - Confirmed the DirectML implementation from commit `b096aee` and prepared Windows installer version `1.0.0-beta.windows.3`.
