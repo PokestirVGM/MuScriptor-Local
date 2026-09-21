@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
         self.layout.setSpacing(20)
         self.layout.setSizeConstraint(QLayout.SetNoConstraint)
         title_row = QHBoxLayout()
-        title_row.addWidget(styled_label("AUDIO → MIDI", "title"), 1)
+        title_row.addWidget(styled_label("MuScriptor Local", "title"), 1)
         self.web_button = QPushButton("Open Web GUI")
         self.web_button.setObjectName("link")
         self.web_button.clicked.connect(self.open_web_gui)

@@ -25,7 +25,7 @@ python tools/collect-windows-licenses.py 'build/windows/dist/MuScriptor Local/Le
 if ($LASTEXITCODE -ne 0) { throw 'Could not collect required license notices.' }
 New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
 Compress-Archive -Path 'build/windows/dist/MuScriptor Local' -DestinationPath 'dist/windows/MuScriptor-Local-1.0-Beta-Windows-x64-Portable.zip' -Force
-Write-Output 'Built the Windows 1.0 Beta portable archive.'
+Write-Output 'Built the Windows 1.0 Beta 2 portable archive.'
 
 $compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (!$compiler) {
