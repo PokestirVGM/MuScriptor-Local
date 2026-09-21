@@ -157,7 +157,7 @@ class WindowsUITests(unittest.TestCase):
         self.assertFalse(self.window.quantize.isChecked())
         self.assertFalse(self.window.create_ab.isChecked())
         self.window.instrument_search.setText('piano')
-        self.assertEqual(self.window.instrument_layout.itemAt(0).widget().text(), '⊕  Acoustic Piano')
+        self.assertEqual(self.window.instrument_layout.itemAt(0).widget().text(), 'Acoustic Piano')
         self.window.instrument_layout.itemAt(0).widget().click()
         self.window.add_instrument('drums')
         self.window.add_instrument('drums')

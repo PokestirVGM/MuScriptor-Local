@@ -7,8 +7,8 @@ from pathlib import Path
 import shutil
 import sys
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QRectF, QSettings, QTimer, Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
+from PySide6.QtCore import QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QLayout, QMainWindow, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
@@ -20,6 +20,22 @@ def support_directory():
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "MuScriptor Local"
     return Path.home() / "Library/Application Support/MuScriptor Local"
+
+
+def instrument_add_icon(color):
+    # Draw the circle-plus explicitly: Segoe UI's mathematical glyph can be
+    # tiny or use an inconsistent fallback font on Windows.
+    pixmap = QPixmap(32, 32)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(color, 1.3, Qt.SolidLine, Qt.RoundCap))
+    painter.drawEllipse(QRectF(1.5, 1.5, 13, 13))
+    painter.drawLine(8, 5, 8, 11)
+    painter.drawLine(5, 8, 11, 8)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def label(text=""):
@@ -587,7 +603,10 @@ class MainWindow(QMainWindow):
         query = self.instrument_search.text().strip().casefold()
         matches = [name for name in self.instrument_groups if name not in self.selected_instruments and query in name.replace("_", " ").casefold()]
         for name in matches:
-            button = QPushButton("⊕  " + name.replace("_", " ").title())
+            button = QPushButton(name.replace("_", " ").title())
+            button.setIcon(instrument_add_icon(self.palette().color(QPalette.WindowText)))
+            button.setIconSize(QSize(16, 16))
+            button.setAccessibleName("Add " + name.replace("_", " "))
             button.setObjectName("instrument")
             button.clicked.connect(lambda checked=False, name=name: self.add_instrument(name))
             self.instrument_layout.addWidget(button)
