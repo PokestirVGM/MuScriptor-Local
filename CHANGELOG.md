@@ -1,8 +1,8 @@
 # Changelog
 
-## Windows Beta 4 candidate — experimental AMD support, DirectML fixes and app icons
+## 1.0 Beta 4 for Windows — 2026-09-21
 
-- **New feature: experimental AMD GPU support through DirectML**, introduced in Windows Beta 3 and corrected in this candidate for desktop and local web transcription. Select your Radeon GPU in the processor picker. RX 6800 XT validation is still pending; CPU remains available.
+- **New feature: experimental AMD GPU support through DirectML**, introduced in Windows Beta 3 and corrected in Beta 4 for desktop and local web transcription. Select your Radeon GPU in the processor picker. The owner reports successful testing after the RX 6800 XT failure; CPU remains available.
 - **Upgrading:** choose **App → Repair Dependencies** after installing the update to install the required GPU dependencies.
 - Fix the reported DirectML `Cannot set version_counter for inference tensor` failure by replacing upstream's inference-mode generator decorator with no-gradient execution on DirectML model instances only. Desktop and web transcription share this correction.
 - Recognize that DirectML error for desktop CPU recovery if it occurs elsewhere.
@@ -10,7 +10,7 @@
 - Draw readable circle-plus instrument buttons independently of Windows font glyphs.
 - Use the official upstream MuScriptor mark for Windows executable/setup/window icons and the next macOS app bundle. Existing macOS releases remain unchanged.
 - Set the Windows taskbar application identity and matching installer shortcuts so the running app uses the MuScriptor icon instead of Python's default icon.
-- AMD support remains experimental; the corrected build needs retesting on the RX 6800 XT.
+- AMD support remains experimental. Full Large-model checks passed on integrated AMD graphics and NVIDIA through DirectML; the owner's RX 6800 XT follow-up was positive. Performance and compatibility vary by hardware and model.
 
 ## 1.0 Beta 3 for Windows — 2026-09-21
 

@@ -16,7 +16,13 @@ The RX 6800 XT report showed successful dependency repair and model loading, fol
 - 24 worker tests and 12 transcription-option tests passed on the pinned runtime; the earlier UI/web unit checks passed as well.
 - Official upstream waveform-and-note assets are wired into Windows executable, setup and window icons, and the next macOS bundle. ICO and ICNS decode correctly; a native macOS build was not run on Windows. Existing macOS downloads are unchanged.
 
-These results do **not** validate the RX 6800 XT. Support remains experimental; install the candidate and test desktop and web transcription on that machine before claiming the reported hardware issue resolved. Choose **App → Repair Dependencies** after upgrading. No private audio, credentials, personal paths, or raw local logs are included in this record.
+The automated physical checks above use integrated AMD graphics, **not** an RX 6800 XT. The owner's subsequent feedback is recorded below. Support remains experimental. Choose **App → Repair Dependencies** after upgrading. No private audio, credentials, personal paths, or raw local logs are included in this record.
+
+### Owner follow-up
+
+The owner subsequently reported that the candidate works during testing after the RX 6800 XT failure, then explicitly authorized publication as a new Windows release. The brief report did not separately specify desktop versus web results, so it does not expand the detailed hardware checks above. Follow-up build source `1f7f76c` adds the Windows taskbar identity, matching shortcut identity and application-wide icon; it does not change transcription. Native Windows identity/icon checks and the Windows UI suite passed locally (19 passed, one optional visual-artifact test skipped).
+
+The final [Windows workflow, run 35565724775](https://github.com/PokestirVGM/MuScriptor-Local/actions/runs/35565724775), passed all build, UI, installer/executable startup, CPU and DirectML dependency/test steps. Both downloaded release packages passed the private-content audit; bundled engine sources match the checkout. Final installer SHA-256: `97e93413dd116752e0520980fdf53a4d1104ec554a42814d9c4adceaa987867d`. Final portable SHA-256: `1bec226643652c2cd8a49637dbc66148c194d366cbea04d63041103971153619`. These supersede the earlier candidate hashes above; final publication is authorized as `v1.0.0-beta.windows.4`.
 
 ## Windows Beta 3 validation — 2026-09-21
 
