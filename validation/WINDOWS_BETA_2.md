@@ -1,6 +1,6 @@
-# Windows Beta 2 candidate validation
+# Windows Beta 2 validation
 
-Validated on 2026-09-20 (local time). This is a candidate for owner testing, not authorization to publish. macOS Beta 3 and its three asset digests are unchanged.
+Validated on 2026-09-20 (local time). The owner explicitly approved this candidate for Windows beta publication after installer handoff. Approval is recorded separately from test evidence; it does not imply that every remaining manual check was independently verified. macOS Beta 3 and its three asset digests are unchanged.
 
 ## Build and interface
 
@@ -38,7 +38,7 @@ Validated on 2026-09-20 (local time). This is a candidate for owner testing, not
 - Desktop integration verified the emitted local browser URL, reuse of the selected cached model, locked desktop controls during web use, return to a ready desktop, and closed server ports after Return to Desktop and Quit. The integration harness intercepts the OS browser-launch call; the owner's default-browser handoff remains part of interactive acceptance.
 - The browser displayed its export menu. The in-app browser did not report a download event after clicking MIDI; the actual browser-saved file and its destination still require owner confirmation. The HTTP MIDI payload itself was validated.
 
-## Remaining owner acceptance and beta limits
+## Approval and remaining beta limits
 
 - Package audit checks every entry for credentials, private home paths, local logs, weights, and personal audio/MIDI. The only audio allowlist is the official web GUI's two public example MP3s, each required to match the pinned upstream file byte for byte. The candidate app's packaged startup test passed locally.
 
@@ -46,4 +46,4 @@ Validated on 2026-09-20 (local time). This is a candidate for owner testing, not
 - Both notation and A/B success/fallback paths were exercised with generated test audio. Accuracy on the owner's recordings and other material remains part of musical evaluation.
 - Small/Medium require the user's separate model terms and were not downloaded or transcribed in this session. Other GPUs, Windows 10, and a complete uninstall/preservation cycle remain unvalidated.
 - The executable and installer are unsigned. First setup and new model downloads require Internet access. Current Hugging Face downloads may restart an interrupted file.
-- Do not publish a Windows release until the owner has tried this candidate and explicitly approved publication. Use a new Windows tag; preserve all existing releases, including macOS Beta 3.
+- The owner explicitly approved release of this candidate. Release tag: `v1.0.0-beta.windows.2`. The exact tested installer and portable package are used; existing releases, including macOS Beta 3, are preserved.

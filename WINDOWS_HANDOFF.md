@@ -19,7 +19,7 @@ For a new chat on another computer:
 
 ## Validate before the next Windows release
 
-The Windows Beta 2 candidate uses installer version `1.0.0-beta.windows.2`. See [the candidate validation record](validation/WINDOWS_BETA_2.md) for the current physical-PC checks and remaining owner acceptance. Source changes are on main; publication is still held for the owner's explicit approval after trying the installer. Do not treat the approval for the older Windows Beta 1 as approval for Beta 2.
+Windows Beta 2 uses installer version and release tag `1.0.0-beta.windows.2`. The owner explicitly approved this candidate for release after it was handed over for installation and testing. Publish the exact tested packages from build commit `3c93e39`; subsequent changes record validation and release documentation only. See [the validation record](validation/WINDOWS_BETA_2.md). This approval applies to Beta 2 only; future releases require fresh approval. Preserve macOS Beta 3 and all existing releases.
 
 Use WINDOWS.md for build/setup instructions and validation/WINDOWS_RESULTS.md for the scope of the earlier physical-PC checks. Those older results do not prove the newly added options have been tested on Windows hardware.
 
