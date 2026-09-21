@@ -1,7 +1,9 @@
 # Changelog
 
-## Windows Beta 4 candidate — DirectML inference fix and app icons
+## Windows Beta 4 candidate — experimental AMD support, DirectML fixes and app icons
 
+- **New feature: experimental AMD GPU support through DirectML**, introduced in Windows Beta 3 and corrected in this candidate for desktop and local web transcription. Select your Radeon GPU in the processor picker. RX 6800 XT validation is still pending; CPU remains available.
+- **Upgrading:** choose **App → Repair Dependencies** after installing the update to install the required GPU dependencies.
 - Fix the reported DirectML `Cannot set version_counter for inference tensor` failure by replacing upstream's inference-mode generator decorator with no-gradient execution on DirectML model instances only. Desktop and web transcription share this correction.
 - Recognize that DirectML error for desktop CPU recovery if it occurs elsewhere.
 - Keep waveform padding/collation on CPU and rebuild the DirectML attention cache without nested slice writes, preventing corrupted conditioning and empty MIDI output.
