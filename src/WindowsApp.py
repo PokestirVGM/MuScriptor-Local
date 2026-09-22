@@ -9,12 +9,12 @@ import shutil
 import sys
 from engine_install import install as install_engine
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtCore import QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QLayout, QMainWindow, QMenu, QToolButton, QDialog, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
-    QStyleOptionButton, QVBoxLayout, QWidget, QPlainTextEdit,
+    QFrame, QListView, QStyledItemDelegate, QLayout, QMainWindow, QMenu, QToolButton, QDialog, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle,
+    QStyleOptionButton, QStyleOptionComboBox, QVBoxLayout, QWidget, QPlainTextEdit,
 )
 
 WINDOWS_APP_ID = "MuScriptor.Local.Desktop"
@@ -70,6 +70,53 @@ def instrument_add_icon(color):
     painter.drawLine(5, 8, 11, 8)
     painter.end()
     return QIcon(pixmap)
+
+
+class SelectionBox(QComboBox):
+    """A unified rounded field with a scalable, borderless dropdown chevron."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        view = QListView(self)
+        self.setView(view)
+        # Qt's combo-specific delegate paints a raised native menu selection,
+        # bypassing item styling. Use the regular list delegate for a flat menu.
+        view.setItemDelegate(QStyledItemDelegate(view))
+        popup = view.window()
+        if isinstance(popup, QFrame):
+            popup.setFrameShape(QFrame.NoFrame)
+        popup.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+
+    def showPopup(self):
+        super().showPopup()
+        self.clip_popup()
+        QTimer.singleShot(0, self.clip_popup)
+
+    def clip_popup(self):
+        # The native popup container extends beyond the styled list on Windows.
+        # Clip that outer window too, so its square backing cannot show through.
+        view = self.view()
+        popup = view.window()
+        bounds = QRectF(view.rect()).translated(QPointF(view.mapTo(popup, view.rect().topLeft())))
+        shape = QPainterPath()
+        shape.addRoundedRect(bounds, 6, 6)
+        popup.setMask(QRegion(shape.toFillPolygon().toPolygon()))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        arrow = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, self)
+        center = QRectF(arrow).center()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = self.palette().color(QPalette.Active if self.isEnabled() else QPalette.Disabled, QPalette.Text)
+        painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPolyline([
+            QPointF(center.x() - 3.5, center.y() - 1.5),
+            QPointF(center.x(), center.y() + 2),
+            QPointF(center.x() + 3.5, center.y() - 1.5),
+        ])
+        painter.end()
 
 
 class InstrumentResizeHandle(QWidget):
@@ -329,7 +376,7 @@ class MainWindow(QMainWindow):
         model_header.addWidget(self.cache_status)
         model_layout.addLayout(model_header)
         # Retain the model selection API and signals, presenting it as segments.
-        self.model = QComboBox(self)
+        self.model = SelectionBox(self)
         self.model.hide()
         for size in ("small", "medium", "large"):
             self.model.addItem(size.title(), size)
@@ -475,9 +522,9 @@ class MainWindow(QMainWindow):
         instrument_resize.addWidget(self.instrument_resize_handle)
         options.addLayout(instrument_resize)
         timing_main = QHBoxLayout()
-        self.tempo_mode = QComboBox()
+        self.tempo_mode = SelectionBox()
         self.tempo_mode.addItem("Auto", "auto"); self.tempo_mode.addItem("Manual", "manual")
-        self.tempo_meter = QComboBox()
+        self.tempo_meter = SelectionBox()
         self.tempo_meter.setEditable(True)
         for meter in ("Auto", "2/4", "3/4", "4/4", "6/8", "9/8", "12/8", "5/4", "7/8"):
             self.tempo_meter.addItem(meter)
@@ -497,7 +544,7 @@ class MainWindow(QMainWindow):
         self.tempo_bpm = QLineEdit("120"); self.tempo_bpm.setMaximumWidth(70); self.tempo_bpm.setAccessibleName("BPM")
         manual_layout.addWidget(QLabel("BPM")); manual_layout.addWidget(self.tempo_bpm); manual_layout.addWidget(styled_label("Sets the grid; playback stays at the original speed.", "caption"))
         options.addWidget(self.manual_timing_widget)
-        self.tempo_subdivision = QComboBox()
+        self.tempo_subdivision = SelectionBox()
         for field_label, value in (("Snap to: Auto", "auto"), ("Eighth notes", "2"), ("Sixteenth notes", "4"), ("Eighth-note triplets", "3")):
             self.tempo_subdivision.addItem(field_label, value)
         options.addWidget(self.tempo_subdivision)
@@ -512,13 +559,13 @@ class MainWindow(QMainWindow):
         self.advanced_timing = QWidget()
         advanced = QVBoxLayout(self.advanced_timing); advanced.setContentsMargins(0,0,0,0)
         advanced.addWidget(styled_label("Tempo sets the grid without changing playback speed. Quantization moves notes.", "caption"))
-        self.tempo_unit = QComboBox()
+        self.tempo_unit = SelectionBox()
         for field_label, value in (("Beat unit: From time signature", "auto"), ("Quarter note", "quarter"), ("Dotted quarter", "dotted-quarter"), ("Eighth note", "eighth")):
             self.tempo_unit.addItem(field_label, value)
         advanced.addWidget(self.tempo_unit)
         self.tempo_downbeat = QLineEdit("0"); self.tempo_downbeat.setAccessibleName("First downbeat seconds")
         row = QHBoxLayout(); row.addWidget(QLabel("First downbeat (seconds)")); row.addWidget(self.tempo_downbeat); advanced.addLayout(row)
-        self.tempo_factor = QComboBox()
+        self.tempo_factor = SelectionBox()
         for field_label, value in (("Detected pulse: Normal", 1), ("Half tempo", .5), ("Double tempo", 2)):
             self.tempo_factor.addItem(field_label, value)
         advanced.addWidget(self.tempo_factor)
@@ -629,7 +676,7 @@ class MainWindow(QMainWindow):
         self.hardware = styled_label("Detecting available processors…", "caption")
         info.addWidget(self.hardware)
         info.addWidget(styled_label("Processor", "captionHeading"))
-        self.device = QComboBox()
+        self.device = SelectionBox()
         self.device.addItem("Automatic", "auto")
         self.device.setAccessibleName("Processor")
         self.device.currentIndexChanged.connect(self.select_device)
@@ -653,11 +700,8 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(body)
         self.setCentralWidget(scroll)
-        menu = self.menuBar().addMenu("App")
-        self.repair_action = menu.addAction("Repair Dependencies…", self.repair)
-        logs_action = menu.addAction("Show Logs", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.support / "Logs"))))
-        self.options_menu.addAction(self.repair_action)
-        self.options_menu.addAction(logs_action)
+        self.repair_action = self.options_menu.addAction("Repair Dependencies…", self.repair)
+        self.options_menu.addAction("Show Logs", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.support / "Logs"))))
         self.update_instruments()
         self.refresh()
         if autostart:
@@ -730,6 +774,14 @@ class MainWindow(QMainWindow):
             QPushButton#selected {{ background: rgba(71, 154, 255, 25); border: 1px solid transparent; border-radius: 7px; padding: 0; }}
             QPushButton#selected:focus {{ border-color: {accent}; }}
             QLineEdit, QComboBox {{ background: {field}; border: 1px solid {border}; border-radius: 5px; padding: 5px 7px; }}
+            QComboBox {{ padding-right: 30px; }}
+            QComboBox:hover {{ border-color: {muted}; }}
+            QComboBox:focus {{ border-color: {accent}; }}
+            QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 28px; border: none; background: transparent; }}
+            QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
+            QComboBox QAbstractItemView {{ background: {field}; color: {text}; border: 1px solid {border}; border-radius: 6px; padding: 4px; selection-background-color: {accent}; selection-color: white; outline: none; }}
+            QComboBox QAbstractItemView::item {{ min-height: 26px; padding: 2px 7px; border: none; border-radius: 4px; }}
+            QComboBox QAbstractItemView::item:selected {{ background: {accent}; color: white; border: none; }}
             QLineEdit#instrumentSearch {{ padding: 3px 5px; }}
             QCheckBox {{ spacing: 7px; background: transparent; }}
             QCheckBox::indicator {{ width: 16px; height: 16px; }}
@@ -741,8 +793,8 @@ class MainWindow(QMainWindow):
             QScrollBar::handle:vertical:hover {{ background: {muted}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; border: none; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-            QMenuBar, QMenu {{ background: {bg}; color: {text}; }}
-            QMenuBar::item:selected, QMenu::item:selected {{ background: {segment}; }}
+            QMenu {{ background: {bg}; color: {text}; }}
+            QMenu::item:selected {{ background: {segment}; }}
             QProgressBar {{ background: {card}; border: 1px solid {border}; border-radius: 5px; text-align: center; min-height: 12px; }}
             QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
         """)
@@ -991,7 +1043,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("device", requested)
             self.device.blockSignals(False)
             if sys.platform == "win32" and not any(d["id"].startswith(("cuda:", "privateuseone:")) for d in event.get("devices", [])):
-                self.hardware.setText(self.hardware.text() + "\nNo supported GPU is available to the engine. For AMD graphics, update the driver and choose App → Repair Dependencies to install DirectML support.")
+                self.hardware.setText(self.hardware.text() + "\nNo supported GPU is available to the engine. For AMD graphics, update the driver and choose the cog → Repair Dependencies to install DirectML support.")
         elif kind == "capabilities":
             self.busy = False
             self.export_readiness.show()
@@ -1292,7 +1344,7 @@ class MainWindow(QMainWindow):
                 self.dependency_failed = False
                 self.start()
             else:
-                message = "Engine setup did not finish. Try Again repairs the installation. Open App → Show Logs for details."
+                message = "Engine setup did not finish. Try Again repairs the installation. Open the cog → Show Logs for details."
                 try:
                     log = (self.support / "Logs/setup.log").read_text(errors="replace")[-65536:].lower()
                     if "untrusted mount point" in log:

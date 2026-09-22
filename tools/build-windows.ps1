@@ -11,6 +11,11 @@ python tools/build-web.py
 if ($LASTEXITCODE -ne 0) { throw 'Could not bundle the official web GUI.' }
 python -m pip install -r requirements-windows-ui.txt
 if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
+# Bundle a fresh source copy without bytecode containing local developer paths.
+# Keep the working engine and its validation caches untouched.
+$engineSource = "$PWD/build/windows/engine-source-$([guid]::NewGuid().ToString('N'))"
+python -c "import shutil,sys; shutil.copytree(sys.argv[1],sys.argv[2],ignore=shutil.ignore_patterns('__pycache__','*.pyc','*.pyo'))" "$PWD/upstream/muscriptor" $engineSource
+if ($LASTEXITCODE -ne 0) { throw 'Could not stage clean engine sources.' }
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor Local' --icon "$PWD/assets/muscriptor.ico" --distpath build/windows/dist --workpath build/windows/work --specpath build/windows `
     --add-data "$PWD/assets/muscriptor.ico;resources/assets" `
     --add-data "$PWD/assets/muscriptor-header-dark.png;resources/assets" `
@@ -19,7 +24,7 @@ python -m PyInstaller --noconfirm --clean --windowed --onedir --name 'MuScriptor
     --add-data "$PWD/tools/bootstrap-windows.ps1;resources/tools" `
     --add-data "$PWD/requirements-windows.txt;resources" `
     --add-data "$PWD/VERSION;resources" `
-    --add-data "$PWD/upstream/muscriptor;resources/upstream/muscriptor" `
+    --add-data "$engineSource;resources/upstream/muscriptor" `
     --add-data "$PWD/upstream/pyproject.toml;resources/upstream" `
     --add-data "$PWD/upstream/README.md;resources/upstream" `
     --add-data "$PWD/upstream/LICENSE;resources/upstream" src/WindowsApp.py

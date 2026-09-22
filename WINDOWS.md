@@ -2,7 +2,7 @@
 
 **Current source: 1.0 Release Candidate 1.** Published Beta 4 remains separate. Session save/open/recovery, cancellation, strict-quantization disclosure, export readiness, and staged upgrades are shared with macOS. See [the release candidate checklist](WINDOWS_HANDOFF.md).
 
-An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. AMD acceleration through DirectML remains experimental. The owner reported successful RX 6800 XT testing after the Beta 4 fix; this release candidate still needs Windows hardware validation. Existing users must choose **App → Repair Dependencies** after upgrading. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
+An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. AMD acceleration through DirectML remains experimental. The owner reported successful RX 6800 XT testing after the Beta 4 fix; this release candidate still needs Windows hardware validation. Existing users must choose **Cog menu → Repair Dependencies** after upgrading. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
 
 For normal use, you do not install Python or Node or run terminal commands. The app manages setup in your user folder and caches the models you download. The installer bundles the app and engine source; first launch downloads the private runtime and selected models, so Internet access and your own Hugging Face model access are needed initially. Optional MuseScore/FluidSynth features have additional requirements.
 
@@ -51,7 +51,7 @@ The private engine uses Python 3.12.14 and matching PyTorch/torchaudio 2.7.1 CUD
 This feature was included in Windows Beta 3 and corrected in Beta 4. It targets DirectX 12 AMD GPUs such as the Radeon RX 6800 XT on Windows 10/11 x64. It uses Microsoft's [PyTorch DirectML backend](https://learn.microsoft.com/en-us/windows/ai/directml/pytorch-windows). The RX 6800 XT is not listed in AMD's [native Windows ROCm 7.2.1 support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/docs-7.2.1/docs/compatibility/compatibilityrad/windows/windows_compatibility.html), so installing ROCm is not the setup path for this card.
 
 1. Update the Radeon graphics driver and install a Windows build made from the updated source.
-2. For an existing installation, choose **App → Repair Dependencies**. First-time setup selects DirectML automatically when AMD graphics are detected and NVIDIA's setup tool is absent. Cached models are retained.
+2. For an existing installation, choose **Cog menu → Repair Dependencies**. First-time setup selects DirectML automatically when AMD graphics are detected and NVIDIA's setup tool is absent. Cached models are retained.
 3. Start with **Small** and a short recording. Expand processor settings and confirm **DirectML (experimental) — AMD Radeon RX 6800 XT**, or select that adapter explicitly if the machine also has integrated graphics.
 4. Transcribe and check that the footer still says DirectML when it finishes. A warning and CPU footer mean the desktop retried on CPU, not that the GPU run succeeded.
 
@@ -92,7 +92,7 @@ By default, Strict quantization is off. Auto tempo may download the optional bea
 
 ## Recovery and updates
 
-**Try Again** repairs incomplete engine setup. **App → Repair Dependencies** repeats automatic engine setup. **App → Show Logs** opens local diagnostics; redact personal paths before sharing any log excerpts.
+**Try Again** repairs incomplete engine setup. **Cog menu → Repair Dependencies** repeats automatic engine setup. **Cog menu → Show Logs** opens local diagnostics; redact personal paths before sharing any log excerpts.
 
 Close the app before upgrading through the installer. Cancel operation stops transcription or model downloads and keeps selection/settings. Closing during work also cancels the active operation; completed MIDI remains intact. Retry interrupted model downloads in the app; the current Hugging Face client may restart an interrupted file, so allow time and disk space for another full download. Uninstall removes the app and shortcuts while retaining engine files, shared model caches, credentials, settings, and MIDI. Remove retained data separately only if you no longer need it.
 

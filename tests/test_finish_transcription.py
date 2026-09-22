@@ -102,12 +102,17 @@ class FinishTests(unittest.TestCase):
 
     def test_command_reader_does_not_hold_stdin_during_worker_shutdown(self):
         script = "from worker import CommandInbox; import sys; inbox=CommandInbox(sys.stdin); next(iter(inbox)); print('done',flush=True)"
-        process=subprocess.Popen([sys.executable,'-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        # sys.path changes in this test process are not inherited by a child.
+        # Resolve worker from its source directory on a clean Windows runner too.
+        process=subprocess.Popen([sys.executable,'-c',script],cwd=Path(worker.__file__).parent,
+                                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
             process.stdin.write('{"action":"quit"}\n');process.stdin.flush()
-            self.assertEqual(process.wait(timeout=5),0)
+            code = process.wait(timeout=5)
+            errors = process.stderr.read()
+            self.assertEqual(code,0,errors)
             self.assertEqual(process.stdout.read().strip(),'done')
-            self.assertNotIn('Fatal Python error',process.stderr.read())
+            self.assertNotIn('Fatal Python error',errors)
         finally:
             if process.poll() is None:process.kill();process.wait()
             process.stdin.close();process.stdout.close();process.stderr.close()
