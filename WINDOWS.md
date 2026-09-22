@@ -1,16 +1,16 @@
 # MuScriptor Local for Windows
 
-**Current source: 1.0 Release Candidate 1.** Published Beta 4 remains separate. Session save/open/recovery, cancellation, strict-quantization disclosure, export readiness, and staged upgrades are shared with macOS. See [the release candidate checklist](WINDOWS_HANDOFF.md).
+**Current release: 1.0 Release Candidate 1 (prerelease).** Earlier Beta downloads remain available. Session save/open/recovery, cancellation, strict-quantization disclosure, export readiness, and staged upgrades are shared with macOS. See [the release candidate checklist](WINDOWS_HANDOFF.md).
 
-An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. AMD acceleration through DirectML remains experimental. The owner reported successful RX 6800 XT testing after the Beta 4 fix; this release candidate still needs Windows hardware validation. Existing users must choose **Cog menu → Repair Dependencies** after upgrading. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
+An easy local desktop app for the official MuScriptor engine. The installer and app handle a private Python environment, engine dependencies, model downloads, and Small/Medium/Large selection. Audio and transcription stay on your PC. Windows 10/11 x64 is supported; Windows ARM is not included. AMD acceleration through DirectML remains experimental. The owner reported successful RX 6800 XT testing after the Beta 4 fix; RC1 was tested with Large on RTX 5070 Ti, while full RX 6800 XT RC1 acceptance remains open. Existing users must choose **Cog menu → Repair Dependencies** after upgrading. This is an independent community launcher for MuScriptor by Kyutai and Mirelo.
 
 For normal use, you do not install Python or Node or run terminal commands. The app manages setup in your user folder and caches the models you download. The installer bundles the app and engine source; first launch downloads the private runtime and selected models, so Internet access and your own Hugging Face model access are needed initially. Optional MuseScore/FluidSynth features have additional requirements.
 
-## Current development interface
+## Desktop and web interface
 
 This release candidate includes the compact desktop interface and local web GUI. The Windows Qt interface closely follows the current macOS layout: a compact 560-pixel default width, a small Small/Medium/Large segmented control, matching charcoal colors and spacing, a dashed audio drop area, neutral instrument rows, rounded checkboxes and panels, and a completion view with Save MIDI Copy and Reveal in Explorer actions. The gear menu provides sessions, processor and app information, model folder, logs, repair, and export requirements. Colors follow the light or dark palette at launch. Windows retains its native title bar, Segoe UI font, file dialogs, and Explorer actions. The window can be resized, and the page scrolls for longer content and larger display scaling.
 
-Search **Instruments** to add supported upstream groups; click a selected item’s × to remove it. Empty means unrestricted detection. **Quantize** and **Create A/B audio render** both start unchecked and use the same worker APIs as the Mac. Tempo Auto follows detected beats; Manual sets a known BPM without changing playback speed or the original start. Time signature and Quantize are separate controls. Quantize optionally snaps individual notes; leave it off to preserve their times. Advanced contains beat anchors, pickup position, and meter changes. The desktop and bundled web GUI share the same timing implementation; see the README for compound-meter interpretation and detection limitations.
+Search **Instruments** to add supported upstream groups; click a selected item’s × to remove it. Empty means unrestricted detection. **Strict quantization** and **Create A/B audio render** both start unchecked and use the same worker APIs as the Mac. Tempo Auto follows detected beats; Manual sets a known BPM without changing playback speed or the original start. Time signature and Strict quantization are separate controls. Strict quantization optionally snaps individual notes; leave it off to preserve their times. Advanced contains beat anchors, pickup position, and meter changes. The desktop and bundled web GUI share the same timing implementation; see the README for compound-meter interpretation and detection limitations.
 
 A/B audio has original audio on the left and performance-timing MIDI synthesis on the right, even when the separately exported MIDI is quantized. Install FluidSynth for Windows, add the directory containing `fluidsynth.exe` to your user `PATH`, and reopen the app. Use **Choose SoundFont…** to select a local `.sf2` file. Rendering does not download a SoundFont. Missing dependencies or rendering failures preserve the completed MIDI and show a warning. Successful A/B audio gets its own saved-path display and Explorer button. Saving a MIDI copy does not move the A/B audio.
 
@@ -24,11 +24,11 @@ Qt tests cover the controls, state transitions, and long paths at the minimum wi
 
 Current `main` builds also bundle the official web frontend from the same pinned MuScriptor revision as the engine. Click **Open Web GUI** after downloading a model: it opens in your browser and reuses the app's installation, selected model, and processor. No separate web setup or second transcription-model download is needed. Keep the desktop app open; **Return to Desktop** stops the web server and any active web transcription, then restores the latest saved session. Save/apply browser changes first; unsaved edits are not retained. Browser exports use browser download settings. Optional playback can fetch a SoundFont, and sheet-music export requires MuseScore 4+.
 
-The candidate includes the latest shared UI and timing updates. It has not been approved for publication; see [the handoff instructions](WINDOWS_HANDOFF.md).
+RC1 includes the shared UI and timing updates and the Windows dropdown refinements. See [RC1 PC validation and remaining limits](validation/WINDOWS_RC1_PC.md).
 
-### Installing the published beta
+### Installing RC1
 
-1. Download **MuScriptor-Local-1.0-Beta-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.windows.4).
+1. Download **MuScriptor-Local-1.0-RC1-Windows-x64-Setup.exe** from the [Windows release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-rc.windows.1).
 2. Run the installer. It installs for your account and creates a Start Menu shortcut and uninstaller; administrator access is not required.
 3. Open MuScriptor Local and allow first-run engine setup to finish. Internet access is required for the private Python runtime and CPU or CUDA dependencies.
 4. Choose a model. Accept that size's Hugging Face terms yourself, then connect your own read token in the app. Each size requires separate acceptance and download.
@@ -96,7 +96,7 @@ By default, Strict quantization is off. Auto tempo may download the optional bea
 
 Close the app before upgrading through the installer. Cancel operation stops transcription or model downloads and keeps selection/settings. Closing during work also cancels the active operation; completed MIDI remains intact. Retry interrupted model downloads in the app; the current Hugging Face client may restart an interrupted file, so allow time and disk space for another full download. Uninstall removes the app and shortcuts while retaining engine files, shared model caches, credentials, settings, and MIDI. Remove retained data separately only if you no longer need it.
 
-## Beta scope
+## Validation and release scope
 
 - The installer and executable are unsigned.
 - Large-model CUDA and offline CPU transcription were tested on Windows 11 with an AMD Ryzen 9 9950X and NVIDIA GeForce RTX 5070 Ti (16 GB), driver 610.88.
@@ -105,7 +105,7 @@ Close the app before upgrading through the installer. Cancel operation stops tra
 - Transcription is approximate and may require musical editing. CPU mode is slower.
 - Downloads contain no model weights, credentials, personal recordings, MIDI results, or private logs. The official web GUI includes its two unchanged public example audio clips. Component notices are in **Legal**.
 
-The [macOS Beta 3 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-beta.3) remains available. Windows Beta 2 is a separate release approved by the owner; macOS Beta 3 is unchanged.
+The [macOS RC1 release](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-rc.mac.1) is available separately. Earlier Beta releases remain available.
 
 ## Development
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0 Release Candidate 1 — unreleased
+## 1.0 Release Candidate 1 — macOS and Windows prereleases
 
 - Restore desktop session state after web handoff or engine restart, retain unapplied timing, ignore obsolete worker messages, and keep saved-session editing available without the selected model. Reject invalid/empty audio before inference on all frontends. Make the Mac release instructions part of the source handoff and refresh Windows documentation.
 

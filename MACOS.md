@@ -1,6 +1,8 @@
 # MuScriptor Local — 1.0 Release Candidate 1
 
-Independent adaptation by Pokestir, based on MuScriptor by Kyutai and Mirelo. This is an unpublished release candidate for Apple Silicon Macs running macOS 14 or later.
+Independent adaptation by Pokestir, based on MuScriptor by Kyutai and Mirelo. This is a prerelease for Apple Silicon Macs running macOS 14 or later.
+
+[Download macOS RC1](https://github.com/PokestirVGM/MuScriptor-Local/releases/tag/v1.0.0-rc.mac.1) · [Release validation](https://github.com/PokestirVGM/MuScriptor-Local/blob/main/validation/MACOS_RC1_RELEASE.md)
 
 ## Install and start
 
