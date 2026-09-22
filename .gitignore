@@ -1,23 +1,28 @@
+# Local environments and engine checkout
 .venv/
 .pnpm-store/
 runtime/
-build/
 tools/uv
 upstream/
+
+# Generated packages and build output
+/build/
+/dist/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Local validation inputs, raw output, and screenshots
 validation/*.wav
 validation/*.mp3
 validation/*.m4a
 validation/*.aac
 validation/*.flac
 validation/*.mid
-dist/windows/
-.DS_Store
-dist/*.app/
-dist/App Bundle.noindex/
-dist/*.zip
-dist/Legal/
-validation/*-run.txt
-validation/wrapper-tests.txt
-validation/portable-install.txt
-dist/SHA256SUMS.txt
+validation/*.muscriptor
+validation/*.json
+validation/*.txt
+validation/*.log
+validation/*.png
+validation/ui-previews/

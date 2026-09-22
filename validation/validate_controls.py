@@ -7,6 +7,8 @@ import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+output = root / 'build/validation'
+output.mkdir(parents=True, exist_ok=True)
 os.environ['HF_HUB_OFFLINE'] = '1'
 sys.path.insert(0, str(root / 'src'))
 import worker
@@ -56,5 +58,5 @@ with tempfile.TemporaryDirectory(prefix='muscriptor-validation-') as temporary:
                   backend='Apple MPS', network_attempts=len(attempts), custom_destination_matches_preview=True,
                   chunks=3, notes=notes, midi_seconds=midi.length,
                   warnings=[e['message'] for e in events if e['type'] == 'warning'])
-    (root / 'validation/model-controls-results.json').write_text(json.dumps(result, indent=2) + '\n')
+    (output / 'model-controls-results.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result), file=sys.__stdout__)

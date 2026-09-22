@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 
 root = Path(__file__).resolve().parents[1]
+output = root / 'build/validation'
+output.mkdir(parents=True, exist_ok=True)
 os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -25,7 +27,7 @@ sink = io.StringIO()
 worker.protocol = sink
 worker.main()
 events = [json.loads(line) for line in sink.getvalue().splitlines()]
-(root / 'validation/offline-events.json').write_text(json.dumps(events, indent=2))
+(output / 'offline-events.json').write_text(json.dumps(events, indent=2))
 completions = [e for e in events if e['type']=='complete']
 assert completions, events
 assert not attempts, f'Unexpected network attempts: {attempts}'

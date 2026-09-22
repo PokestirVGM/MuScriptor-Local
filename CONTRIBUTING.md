@@ -7,3 +7,5 @@ Keep model inference in the official engine. Local rhythm export lives in the sh
 Use a dedicated Python environment. macOS builds require Apple Silicon, macOS 14+, and Xcode Command Line Tools. The Windows preview has its own build workflow and hardware-validation requirements on `main`. Record what was actually tested; do not describe mocked GPU checks as real hardware validation.
 
 Before a release, run the relevant automated checks, compile the native application, inspect the packaged archive, confirm portable paths and license notices, and test a complete transcription with a permitted model. A release archive must contain no development-machine paths or authentication material. Generated binaries belong in release assets.
+
+Keep `dist/` and `build/` generated and untracked. Store reusable validation scripts and concise Markdown evidence in `validation/`; write raw results under `build/validation/`. Mac package instructions come from `MACOS.md`, and Windows instructions come from `WINDOWS.md`.
