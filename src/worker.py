@@ -170,9 +170,21 @@ def decoded_audio(source):
         yield source
 
 
+def output_name(name):
+    # Leave room for the extension/collision suffix on common filesystems.
+    # Session names may have originated on another operating system.
+    name = str(name).replace("/", "_").replace("\\", "_")
+    if sys.platform == "win32":
+        name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).rstrip(" .")
+        if name.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1,10)), *(f"LPT{i}" for i in range(1,10))}:
+            name = "_" + name
+    return name.encode("utf-8")[:180].decode("utf-8", errors="ignore") or "Recording"
+
+
 def write_unique(directory, name, data, extension=".mid"):
     """Publish a complete output atomically without ever overwriting an existing file."""
     directory.mkdir(parents=True, exist_ok=True)
+    name = output_name(name)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=directory, prefix=".muscriptor-", delete=False) as f:
@@ -189,7 +201,12 @@ def write_unique(directory, name, data, extension=".mid"):
             suffix = "" if index == 0 else f" ({index + 1})"
             target = directory / f"{name}{suffix}{extension}"
             try:
-                os.link(temporary, target)
+                # Windows rename fails if the destination exists and also works
+                # on FAT/exFAT and shares that do not support hard links.
+                if sys.platform == "win32":
+                    os.rename(temporary, target)
+                else:
+                    os.link(temporary, target)
                 return target
             except FileExistsError:
                 continue
@@ -206,7 +223,7 @@ def planned_output(source, directory=None):
     if not folder.is_dir() or not os.access(folder, os.W_OK):
         folder = SUPPORT / "Results"
         emit("warning", message="That folder isn’t writable. The MIDI will be kept in the app’s Results folder; you can choose another folder.")
-    name = source.stem + "_transcription"
+    name = output_name(source.stem + "_transcription")
     for index in range(10000):
         suffix = "" if index == 0 else f" ({index + 1})"
         path = folder / f"{name}{suffix}.mid"
@@ -531,16 +548,17 @@ class Engine:
         emit("status", message=f"Loading MuScriptor {self.model_size.title()}…")
         if self.device.startswith("privateuseone:"):
             import torch
-            self.model = TranscriptionModel.load_model(path, device="cpu")
-            move_transcription_to_directml(self.model, torch.device(self.device))
+            model = TranscriptionModel.load_model(path, device="cpu")
+            move_transcription_to_directml(model, torch.device(self.device))
             # Conditioning intentionally stays on CPU; verify decoder placement.
-            actual = self.model._model.emb.weight.device
+            actual = model._model.emb.weight.device
         else:
-            self.model = TranscriptionModel.load_model(path, device=self.device)
-            actual = next(self.model._model.parameters()).device
+            model = TranscriptionModel.load_model(path, device=self.device)
+            actual = next(model._model.parameters()).device
         logging.info("Loaded official %s: parameter device=%s", self.model_size, actual)
         if actual.type != self.device.split(":")[0] or (":" in self.device and actual.index != int(self.device.split(":")[1])):
             raise RuntimeError(f"Model did not load on the selected device ({self.device})")
+        self.model = model
         self.device_event()
 
     def prepare(self):
@@ -751,7 +769,7 @@ class Engine:
         wav = torch.zeros((1, 0))
         if audio:
             suffix = Path(audio_name).suffix.lower()
-            if suffix not in (".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif"):
+            if suffix not in (".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma", ".mp4", ".webm", ".mkv", ".mov"):
                 raise UserError("This session's audio format is unsupported.", "timing")
             with tempfile.TemporaryDirectory(prefix="muscriptor-session-") as folder:
                 encoded = Path(folder) / ("audio" + suffix)
@@ -819,7 +837,8 @@ def local_web_app(model, web_dir, origin, app_info=None):
     @app.middleware("http")
     async def same_origin(request, call_next):
         # Prevent unrelated websites from submitting work to the local engine.
-        if request.headers.get("origin") not in (None, origin):
+        if (request.headers.get("origin") not in (None, origin)
+                or request.headers.get("sec-fetch-site") == "cross-site"):
             return PlainTextResponse("Use the local web GUI opened by the app.", status_code=403)
         return await call_next(request)
 
@@ -876,7 +895,7 @@ def report_error(exc):
         return
     from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError
     logging.exception("Operation failed")
-    if isinstance(exc, GatedRepoError) or (isinstance(exc, HfHubHTTPError) and exc.response.status_code in (401, 403)):
+    if isinstance(exc, GatedRepoError) or (isinstance(exc, HfHubHTTPError) and getattr(exc.response, "status_code", None) in (401, 403)):
         emit("error", code="auth", message="Hugging Face authorization isn’t complete. Accept the selected model’s terms, then connect a read token from that same account.")
     elif isinstance(exc, LocalEntryNotFoundError) or any(x in str(exc).lower() for x in ("connection", "resolve host", "offline", "network", "download", "cas client", "request middleware")):
         emit("error", code="model", message="The model isn’t cached yet and couldn’t be downloaded. Connect to the Internet and try again.")
@@ -982,7 +1001,10 @@ def main():
     for line in inbox:
         command = {}
         try:
-            command = json.loads(line)
+            parsed = json.loads(line)
+            if not isinstance(parsed, dict):
+                raise UserError("The engine request must be an object.", "protocol")
+            command = parsed
             action = command.get("action")
             if action == "auth":
                 emit("status", message="Connecting to Hugging Face…")

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased reliability fixes
+
+- Route Windows file drops through scroll areas and editable controls, preserve copy semantics, reject invalid drops, and open dropped sessions on desktop and web. Preserve existing sessions when an invalid file is selected.
+- Save Windows exports without hard links so FAT/exFAT drives are supported; shorten long Unicode output names and handle reserved Windows filenames. Prevent concurrent engine refreshes from interfering with rollback.
+- Add FFmpeg decoding for browser M4A/AAC uploads and keep the local server responsive while audio decodes. Release inference locks on initialization and cleanup failures, and prevent cancelled requests from acquiring abandoned locks.
+- Improve failed-operation retries, model-load recovery, Windows repair shutdown, installer restart handling, portable-session validation, browser stream cleanup, and local-server origin checks.
+- Support offline frontend rebuilds with the installed toolchain and clarify model choices. See [the reliability audit](validation/APP_AUDIT.md) for tests, current model research, and remaining hardware checks.
+
 ## 1.0 Release Candidate 1 — macOS and Windows prereleases
 
 - Restore desktop session state after web handoff or engine restart, retain unapplied timing, ignore obsolete worker messages, and keep saved-session editing available without the selected model. Reject invalid/empty audio before inference on all frontends. Make the Mac release instructions part of the source handoff and refresh Windows documentation.

@@ -8,8 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from PySide6.QtCore import QProcess, QSettings, QEvent, QPointF, Qt
-from PySide6.QtGui import QColor, QPalette, QPixmap, QMouseEvent, QKeyEvent
+from PySide6.QtCore import QMimeData, QPoint, QProcess, QSettings, QEvent, QPointF, Qt, QUrl
+from PySide6.QtGui import QColor, QPalette, QPixmap, QMouseEvent, QKeyEvent, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QApplication
 from WindowsApp import MainWindow
 
@@ -39,6 +39,94 @@ class WindowsUITests(unittest.TestCase):
         old.readAllStandardOutput.assert_not_called()
         self.window.worker.readAllStandardOutput.assert_not_called()
         self.window.worker=None
+
+    def file_mime(self, paths):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+        return mime
+
+    def test_file_drop_reaches_scroll_viewport_and_text_fields(self):
+        path = self.folder / '音楽 with spaces.WAV'; path.write_bytes(b'audio')
+        mime = self.file_mime([path])
+        for widget in (self.window.centralWidget().viewport(), self.window.tempo_bpm, self.window.audio_button):
+            with self.subTest(widget=widget), patch.object(self.window, 'plan') as plan:
+                enter = QDragEnterEvent(QPoint(5,5), Qt.CopyAction | Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+                self.app.sendEvent(widget, enter)
+                self.assertTrue(enter.isAccepted())
+                self.assertEqual(enter.dropAction(), Qt.CopyAction)
+                move = QDragMoveEvent(QPoint(5,5), Qt.CopyAction | Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+                self.app.sendEvent(widget, move)
+                self.assertTrue(move.isAccepted())
+                drop = QDropEvent(QPointF(5,5), Qt.CopyAction | Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+                self.app.sendEvent(widget, drop)
+                self.assertTrue(drop.isAccepted())
+                self.assertEqual(drop.dropAction(), Qt.CopyAction)
+                self.assertEqual(self.window.source, path)
+                self.assertFalse(self.window.audio_button.property('dragging'))
+                plan.assert_called_once()
+        self.assertEqual(self.window.tempo_bpm.text(), '120')
+
+    def test_drop_rejects_directory_remote_multiple_missing_and_busy_files(self):
+        path = self.folder/'song.wav'; path.write_bytes(b'audio')
+        invalid = [self.file_mime([self.folder]), self.file_mime([self.folder/'missing.wav']), self.file_mime([path,path])]
+        remote = QMimeData(); remote.setUrls([QUrl('https://example.com/song.wav')]); invalid.append(remote)
+        for mime in invalid:
+            event = QDragEnterEvent(QPoint(0,0),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier)
+            self.window.dragEnterEvent(event)
+            self.assertFalse(event.isAccepted())
+        for busy, web in ((True,None),(False,'http://127.0.0.1:8000')):
+            self.window.busy, self.window.web_url = busy, web
+            with patch.object(self.window,'stage') as stage:
+                mime = self.file_mime([path])
+                event = QDropEvent(QPointF(0,0),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier)
+                self.window.dropEvent(event); stage.assert_not_called()
+                self.assertFalse(event.isAccepted())
+        self.window.busy=False; self.window.web_url=None
+
+    def test_session_drop_opens_session_without_staging_audio(self):
+        path=self.folder/'Saved.MUSCRIPTOR'; path.write_text('{}')
+        with patch.object(self.window,'open_session') as opened, patch.object(self.window,'plan') as plan:
+            self.window.stage(path)
+            opened.assert_called_once_with(str(path)); plan.assert_not_called()
+        self.assertIsNone(self.window.source)
+
+    def test_invalid_file_preserves_current_session_without_discard_dialog(self):
+        self.window.has_session=True
+        with patch.object(self.window,'confirm_discard_timing') as confirm:
+            self.window.stage(self.folder)
+            confirm.assert_not_called()
+        self.assertTrue(self.window.has_session)
+
+    def test_file_filter_preserves_text_drag_and_other_windows(self):
+        mime=QMimeData(); mime.setText('123')
+        event=QDragEnterEvent(QPoint(0,0),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier)
+        self.assertFalse(self.window.eventFilter(self.window.tempo_bpm,event))
+
+    def test_retry_reapplies_corrected_timing_without_new_transcription(self):
+        self.window.worker=Mock(); self.window.worker.state.return_value=QProcess.Running
+        self.window.has_session=True; self.window.last_action='reexport_session'
+        self.window.setup=True  # Saved-session editing never needs a model download.
+        with patch.object(self.window,'apply_session') as apply, patch.object(self.window,'transcribe') as transcribe:
+            self.window.retry(); apply.assert_called_once(); transcribe.assert_not_called()
+        self.window.worker=None
+
+    def test_failed_setup_start_clears_installer_and_stale_completion_is_ignored(self):
+        old=Mock(); self.window.installer=old
+        self.window.setup_start_failed(old)
+        self.assertIsNone(self.window.installer); self.assertFalse(self.window.busy)
+        current=Mock(); self.window.installer=current
+        with patch.object(self.window,'start') as start:
+            self.window.setup_finished(0,old); start.assert_not_called()
+        self.assertIs(self.window.installer,current)
+        self.window.installer=None
+
+    def test_repair_does_not_install_while_old_worker_still_runs(self):
+        process=Mock();process.state.return_value=QProcess.Running;process.waitForFinished.return_value=False
+        self.window.worker=process;self.window.has_session=True
+        with patch('WindowsApp.sys.platform','win32'),patch.object(QProcess,'execute'),patch('WindowsApp.QProcess') as spawn:
+            self.window.repair(); spawn.assert_not_called()
+        self.assertIs(self.window.worker,process);self.assertTrue(self.window.has_session)
+        self.window.worker=None;self.window.has_session=False
 
     def test_model_download_requirement_keeps_loaded_session_editable(self):
         self.window.has_session = True

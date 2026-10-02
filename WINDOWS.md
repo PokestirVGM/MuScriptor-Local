@@ -36,6 +36,8 @@ RC1 includes the shared UI and timing updates and the Windows dropdown refinemen
 
 The **Portable.zip** alternative contains the same app. Extract the whole archive and keep the executable, **_internal**, and **Legal** folders together. The engine, cache, and settings still live in your Windows account.
 
+Source builds after RC1 route file drops across the window, including scroll areas and timing fields. Drop one local audio file or `.muscriptor` session at a time. Dropping a session opens it without transcribing. Launch the app normally; if Explorer drops stop working after using **Run as administrator**, close it and reopen without that setting, or use the file picker. Source builds also save MIDI to FAT/exFAT drives without requiring hard links. These fixes are not included in the existing RC1 download.
+
 CUDA setup downloads roughly 3 GiB of PyTorch packages plus other dependencies. Large downloads about 5.47 GB of weights. Allow at least 20 GB of free disk space for CUDA setup and Large, including extraction and cache overhead. Additional models require more space.
 
 ## Processor selection

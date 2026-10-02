@@ -53,6 +53,18 @@ class ReleaseTests(unittest.TestCase):
         normalized = session.validate({**self.project,'name':'../../secret.wav','audio_name':'C:\\Users\\somebody\\recording.wav'})
         self.assertEqual(normalized[-2: ],('secret.wav','recording.wav'))
 
+    def test_invalid_audio_timing_and_duration_do_not_replace_sessions(self):
+        for changes in ({'audio':[]},{'audio':42},{'timing':None},{'timing':[]},
+                        {'duration':0,'detection':{}},{'audio_name':'unsafe.exe'}):
+            with self.subTest(changes=changes), self.assertRaises(rhythm.RhythmError):
+                session.validate({**self.project,**changes})
+
+    def test_session_preserves_model_note_tails_beyond_audio_duration(self):
+        # The final five-second model chunk is padded. Its note tail may extend
+        # past the original audio; preserve upstream's performance in sessions.
+        project={**self.project,'duration':.5,'detection':{}}
+        self.assertEqual(session.validate(project)[2],.5)
+
     def test_midi_only_session_can_be_saved_and_recovered_repeatedly(self):
         project = session.make(self.raw, self.detection, 8, {'mode':'manual','bpm':170}, 'No audio.mid', None)
         path = self.folder/'No audio.muscriptor'; session.write(path, project)
@@ -116,6 +128,10 @@ class ReleaseTests(unittest.TestCase):
             exported=client.post('/session/export',json={'session':result['session'],'timing':self.project['timing']},headers={'X-Client-Id':'a'})
             self.assertEqual(exported.json()['midi'],self.project['midi'])
             self.assertEqual(client.post('/session/export',json={'session':result['session']},headers={'X-Client-Id':'b'}).status_code,404)
+            for route in ('/session/export','/rhythm/reexport'):
+                for token in ([],{},42,None):
+                    self.assertEqual(client.post(route,json={'session':token}).status_code,422)
+            self.assertEqual(client.post('/rhythm/reexport',json={'session':result['session'],'timing':None},headers={'X-Client-Id':'a'}).status_code,200)
             self.assertEqual(client.post('/session/recovery',json=self.project).status_code,200)
         with TestClient(create_app(model,recovery_path=recovery)) as client:
             self.assertTrue(client.get('/session/recovery/status').json()['available'])
@@ -153,6 +169,16 @@ class ReleaseTests(unittest.TestCase):
         engine_install.recover(root)
         self.assertEqual((root/'src/worker.py').read_text(),'old worker')
         self.assertFalse(tx.exists())
+
+    def test_parallel_engine_update_cannot_remove_another_installers_transaction(self):
+        root,bundle=self.installation_fixture()
+        with engine_install.installation_lock(root):
+            tx=root/'.engine-update';tx.mkdir();(tx/'in-progress').write_text('keep')
+            with self.assertRaises(OSError):
+                engine_install.install(root,bundle/'worker.py',bundle/'package')
+            self.assertEqual((tx/'in-progress').read_text(),'keep')
+        engine_install.install(root,bundle/'worker.py',bundle/'package')
+        self.assertEqual((root/'src/worker.py').read_text(),'new worker')
 
     def test_readiness_does_not_download_assets(self):
         from muscriptor.utils.capabilities import capabilities

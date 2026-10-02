@@ -19,13 +19,23 @@ stamp = output / "SOURCE_REVISION"
 if (output / "index.html").is_file() and (output / "THIRD_PARTY_LICENSES.txt").is_file() and stamp.is_file() and stamp.read_text().strip() == revision:
     print("Bundled web GUI is current.")
 else:
+    skip_install = "--skip-install" in sys.argv
     pnpm = shutil.which("pnpm")
-    if not pnpm:
+    if not pnpm and not skip_install:
         raise SystemExit("Building the app requires Node.js 22+ and pnpm 10.20.0. Users of the installer do not need either.")
-    if "--skip-install" not in sys.argv:
+    if not skip_install:
         subprocess.run([pnpm, "install", "--frozen-lockfile"], cwd=web, check=True)
     environment = dict(os.environ, VITE_GA_MEASUREMENT_ID="", VITE_APP_VERSION=app_version)
-    subprocess.run([pnpm, "run", "build"], cwd=web, env=environment, check=True)
+    if skip_install:
+        # Use the installed toolchain directly. Newer pnpm releases otherwise
+        # attempt version/dependency downloads even for an offline `run build`.
+        node = shutil.which("node")
+        if not node:
+            raise SystemExit("Building the web GUI requires Node.js 22+.")
+        subprocess.run([node, str(web / "node_modules/typescript/bin/tsc"), "--noEmit"], cwd=web, env=environment, check=True)
+        subprocess.run([node, str(web / "node_modules/vite/bin/vite.js"), "build"], cwd=web, env=environment, check=True)
+    else:
+        subprocess.run([pnpm, "run", "build"], cwd=web, env=environment, check=True)
     # Upstream already supplies offline font fallbacks. Avoid external font
     # requests in the local app without changing the upstream checkout.
     index = output / "index.html"

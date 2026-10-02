@@ -19,6 +19,72 @@ function load(file, imports = {}, globals = {}) {
   return exports;
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+function dropFixture() {
+  const handlers=new Map(),classes=new Set(),files=[],errors=[],dragging=[];
+  const {installFileDrop}=load('fileDrop.ts',{}, {
+    window:{addEventListener:(type,fn)=>handlers.set(type,fn),removeEventListener:(type)=>handlers.delete(type)},
+    document:{body:{classList:{add:name=>classes.add(name),remove:name=>classes.delete(name)}}},
+  });
+  const remove=installFileDrop(file=>files.push(file),active=>dragging.push(active),message=>errors.push(message));
+  function send(type,transfer={types:['Files'],files:[new File(['audio'],'音楽 with spaces.WAV')]}) {
+    let prevented=false;
+    const event={dataTransfer:transfer,preventDefault(){prevented=true;}};
+    handlers.get(type)?.(event);return {event,prevented};
+  }
+  return {send,files,errors,dragging,classes,handlers,remove};
+}
+test('nested browser file drags retain overlay until the window is left', () => {
+  const f=dropFixture();f.send('dragenter');f.send('dragenter');f.send('dragleave',{types:[]});
+  assert.equal(f.classes.has('drag'),true);
+  f.send('dragleave',{types:[]});assert.equal(f.classes.has('drag'),false);
+  const over=f.send('dragover');assert.equal(over.prevented,true);assert.equal(over.event.dataTransfer.dropEffect,'copy');
+  f.send('drop');assert.equal(f.files[0].name,'音楽 with spaces.WAV');assert.equal(f.classes.has('drag'),false);
+});
+test('browser file drop does not intercept text or links', () => {
+  const f=dropFixture();
+  for(const type of ['dragenter','dragover','drop']) assert.equal(f.send(type,{types:['text/plain'],files:[]}).prevented,false);
+  assert.equal(f.classes.size,0);assert.equal(f.files.length,0);
+});
+test('multiple and empty browser drops do not select a replacement file', () => {
+  const f=dropFixture();
+  f.send('drop',{types:['Files'],files:[new File(['a'],'a.wav'),new File(['b'],'b.wav')]});
+  f.send('drop',{types:['Files'],files:[new File([],'folder')]});
+  assert.equal(f.files.length,0);assert.equal(f.errors.length,2);
+});
+test('cancelled browser drags and teardown remove overlay and listeners', () => {
+  const f=dropFixture();f.send('dragenter');f.send('blur');assert.equal(f.classes.size,0);
+  f.send('dragenter');f.remove();assert.equal(f.classes.size,0);assert.equal(f.handlers.size,0);
+});
+test('SSE accepts split CRLF delimiters and joins data fields', async () => {
+  const chunks=['data:{"type":\r\n','data: "progress", "completed":1}\r','\n\r','\n'];
+  const {streamTranscribe}=load('sse.ts',{}, {FormData,TextDecoderStream,fetch:async()=>new Response(new ReadableStream({
+    start(controller){for(const c of chunks)controller.enqueue(new TextEncoder().encode(c));controller.close();},
+  }))});
+  const events=[];
+  for await (const event of streamTranscribe('/transcribe',new File(['audio'],'song.wav'))) events.push(event);
+  assert.equal(events.length,1);assert.equal(events[0].type,'progress');assert.equal(events[0].completed,1);
+});
+test('leaving an SSE iterator cancels the response stream', async () => {
+  let cancelled=false;
+  const {streamTranscribe}=load('sse.ts',{}, {FormData,TextDecoderStream,fetch:async()=>new Response(new ReadableStream({
+    start(controller){controller.enqueue(new TextEncoder().encode('data: {"type":"progress"}\n\n'));},
+    cancel(){cancelled=true;},
+  }))});
+  for await (const event of streamTranscribe('/transcribe',new File(['audio'],'song.wav'))) {
+    assert.equal(event.type,'progress');break;
+  }
+  await tick();assert.equal(cancelled,true);
+});
+test('completed busy retry waits remove abort listeners', async () => {
+  let listeners=0;let attempts=0;
+  const signal={aborted:false, addEventListener(){listeners++;},removeEventListener(){listeners--;}};
+  const {streamTranscribeWithRetry}=load('sse.ts',{}, {FormData,TextDecoderStream,
+    setTimeout(callback){queueMicrotask(callback);return 1;},clearTimeout(){},
+    fetch:async()=> ++attempts === 1 ? {ok:false,status:503,json:async()=>({})} : new Response('data:{"type":"done"}\n\n'),
+  });
+  for await (const event of streamTranscribeWithRetry('/transcribe',new File(['audio'],'song.wav'),{signal})) assert.equal(event.type,'done');
+  assert.equal(attempts,2);assert.equal(listeners,0);
+});
 function audioFixture() {
   const {AudioEngine} = load('audio.ts', {'tone':{},'spessasynth_lib':{},'spessasynth_lib/dist/spessasynth_processor.min.js?url':{}});
   const audio = Object.create(AudioEngine.prototype);

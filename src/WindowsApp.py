@@ -9,7 +9,7 @@ import shutil
 import sys
 from engine_install import install as install_engine
 
-from PySide6.QtCore import QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QEvent, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -293,6 +293,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.installer = None
         self.buffer = b""
+        self.last_action = None
         self.busy = True
         self.transcription_id = None
         self.finish_ready = False
@@ -399,7 +400,7 @@ class MainWindow(QMainWindow):
             segments.addWidget(button)
         self.model_buttons.idClicked.connect(self.model.setCurrentIndex)
         model_layout.addWidget(self.model_segments, 0, Qt.AlignLeft)
-        model_layout.addWidget(styled_label("Small uses less memory · Medium balances size and accuracy · Large favors accuracy", "caption"))
+        model_layout.addWidget(styled_label("Small suits CPU use · Medium balances speed and accuracy · Large favors accuracy and works best on a GPU", "caption"))
         self.layout.addWidget(model_section)
         self.web_widget, web_layout = panel()
         web_layout.addWidget(styled_label("Web GUI running locally", "heading"))
@@ -700,6 +701,11 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(body)
         self.setCentralWidget(scroll)
+        # File drags can land on the scroll viewport or an editable child which
+        # consumes them before QMainWindow sees them. Route only URL drags for
+        # this window, preserving normal text drags and other windows' events.
+        for widget in self.findChildren(QWidget):
+            widget.installEventFilter(self)
         self.repair_action = self.options_menu.addAction("Repair Dependencies…", self.repair)
         self.options_menu.addAction("Show Logs", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.support / "Logs"))))
         self.update_instruments()
@@ -970,6 +976,7 @@ class MainWindow(QMainWindow):
         process.setWorkingDirectory(str(self.root))
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("PYTHONUNBUFFERED", "1")
+        environment.insert("PYTHONUTF8", "1")
         environment.insert("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         process.setProcessEnvironment(environment)
         logs = self.support / "Logs"
@@ -1002,6 +1009,8 @@ class MainWindow(QMainWindow):
             self.fail("The engine connection closed. Click Try Again.")
             return
         self.busy = True
+        if command.get("action") != "finish_transcription":
+            self.last_action = command.get("action")
         self.error.clear()
         self.warning.clear()
         self.status.setText(message)
@@ -1127,6 +1136,8 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def fail(self, message):
+        self.finish_ready = self.finishing = False
+        self.transcription_id = None
         self.busy = False
         self.status.setText("Action needed")
         self.error.setText(message)
@@ -1155,12 +1166,16 @@ class MainWindow(QMainWindow):
             self.stage(Path(path))
 
     def stage(self, path):
-        if not self.confirm_discard_timing(): return
-        if self.busy:
+        if self.busy or self.web_url:
             return
+        path = Path(path)
         if not path.is_file():
             self.fail("Choose an audio file stored on this computer.")
             return
+        if path.suffix.lower() == ".muscriptor":
+            self.open_session(str(path))
+            return
+        if not self.confirm_discard_timing(): return
         self.has_session = False
         self.timing_summary.clear()
         self.source, self.destination, self.result = path, None, None
@@ -1301,6 +1316,14 @@ class MainWindow(QMainWindow):
             self.repair()
         elif self.worker is None or self.worker.state() == QProcess.NotRunning:
             self.start()
+        elif self.last_action == "load_session":
+            self.open_session()
+        elif self.has_session and self.last_action == "reexport_session":
+            self.apply_session()
+        elif self.has_session and self.last_action == "preview_rhythm":
+            self.send({"action": "preview_rhythm", "timing": self.timing_options()}, "Preparing click preview…")
+        elif self.has_session and self.last_action == "save_session":
+            self.save_session()
         elif self.setup:
             self.download()
         elif self.source and not self.destination:
@@ -1318,11 +1341,16 @@ class MainWindow(QMainWindow):
         if self.has_session:
             self.restore_after_restart = self.recovery_path
             self.pending_timing = self.timing_options() if self.recovery_path else None
-            self.has_session = False
         if self.worker:
             process, self.worker = self.worker, None
+            if sys.platform == "win32" and process.state() != QProcess.NotRunning:
+                QProcess.execute("taskkill.exe", ["/PID", str(process.processId()), "/T", "/F"])
             process.kill()
-            process.waitForFinished(3000)
+            if not process.waitForFinished(3000):
+                self.worker = process
+                self.fail("The engine is still stopping. Try Repair Dependencies again.")
+                return
+        self.has_session = False
         self.busy = True
         self.error.clear()
         self.status.setText("Installing private Python and dependencies… First setup needs Internet access.")
@@ -1333,12 +1361,23 @@ class MainWindow(QMainWindow):
         logs.mkdir(parents=True, exist_ok=True)
         process.setStandardOutputFile(str(logs / "setup.log"))
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.errorOccurred.connect(lambda _: self.fail("Setup could not start. See Show Logs.") if process.error() == QProcess.FailedToStart else None)
-        process.finished.connect(lambda code, _: self.setup_finished(code))
+        process.errorOccurred.connect(lambda _: self.setup_start_failed(process) if process.error() == QProcess.FailedToStart else None)
+        process.finished.connect(lambda code, _: self.setup_finished(code, process))
         process.start("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.resources / "tools/bootstrap-windows.ps1"), "-Root", str(self.root), "-Resources", str(self.resources)])
 
-    def setup_finished(self, code):
+    def setup_start_failed(self, process):
+        if self.installer is process:
+            self.installer = None
+            process.deleteLater()
+            self.fail("Setup could not start. See Show Logs.")
+
+    def setup_finished(self, code, process=None):
+        if process is not None and self.installer is not process:
+            process.deleteLater()
+            return
         self.installer = None
+        if process is not None:
+            process.deleteLater()
         if not self.closing:
             if code == 0:
                 self.dependency_failed = False
@@ -1357,24 +1396,57 @@ class MainWindow(QMainWindow):
                     pass
                 self.fail(message)
 
+    def dropped_path(self, mime):
+        if self.busy or self.web_url or not mime.hasUrls():
+            return None
+        urls = mime.urls()
+        if len(urls) != 1 or not urls[0].isLocalFile():
+            return None
+        path = Path(urls[0].toLocalFile())
+        return path if path.is_file() else None
+
+    def set_dragging(self, active):
+        self.audio_button.setProperty("dragging", active)
+        self.audio_button.update()
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop, QEvent.DragLeave) and isinstance(watched, QWidget) and watched.window() is self:
+            if kind in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop) and event.mimeData().hasUrls():
+                if kind == QEvent.Drop:
+                    self.dropEvent(event)
+                else:
+                    self.dragEnterEvent(event)
+                return True
+            if kind == QEvent.DragLeave:
+                self.set_dragging(False)
+        return super().eventFilter(watched, event)
+
     def dragEnterEvent(self, event):
-        if not self.busy and not self.web_url and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
-            self.audio_button.setProperty("dragging", True)
-            self.audio_button.style().unpolish(self.audio_button)
-            self.audio_button.style().polish(self.audio_button)
-            event.acceptProposedAction()
+        accepted = self.dropped_path(event.mimeData()) is not None
+        self.set_dragging(accepted)
+        if accepted:
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
 
     def dragLeaveEvent(self, event):
-        self.audio_button.setProperty("dragging", False)
-        self.audio_button.style().unpolish(self.audio_button)
-        self.audio_button.style().polish(self.audio_button)
+        self.set_dragging(False)
         event.accept()
 
     def dropEvent(self, event):
-        self.dragLeaveEvent(event)
-        if not self.busy and not self.web_url and event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1 and event.mimeData().urls()[0].isLocalFile():
-            self.stage(Path(event.mimeData().urls()[0].toLocalFile()))
-            event.acceptProposedAction()
+        self.set_dragging(False)
+        path = self.dropped_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        self.stage(path)
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
 
     def closeEvent(self, event):
         if not self.confirm_discard_timing():

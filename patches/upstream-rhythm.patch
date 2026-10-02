@@ -1,5 +1,5 @@
 diff --git a/muscriptor/server.py b/muscriptor/server.py
-index c9933d1..76e3b8a 100644
+index c9933d1..d5bf5e5 100644
 --- a/muscriptor/server.py
 +++ b/muscriptor/server.py
 @@ -34,10 +34,12 @@ import threading
@@ -44,7 +44,32 @@ index c9933d1..76e3b8a 100644
      # Bound on how long a same-client resubmit waits for the run it just
      # cancelled to unwind and release the lock. That run stops within one
      # chunk boundary, so this only needs to cover that latency — unlike
-@@ -197,10 +201,36 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -171,7 +175,7 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                 if preempting:
+                     current_cancel.set()
+             if not preempting:
+-                acquired = await asyncio.to_thread(transcribe_lock.acquire, False)
++                acquired = transcribe_lock.acquire(False)
+                 if not acquired:
+                     raise HTTPException(
+                         status_code=503,
+@@ -186,21 +190,49 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+                     status_code=503,
+                     detail="server busy: another transcription is in progress",
+                 )
+-            acquired = await asyncio.to_thread(
+-                transcribe_lock.acquire, True, min(0.1, remaining)
+-            )
++            # Never leave a background thread acquiring the lock after its
++            # HTTP request has been cancelled. Nonblocking polling keeps the
++            # event loop responsive and ownership on the requesting task.
++            acquired = transcribe_lock.acquire(False)
+             if acquired:
+                 break
++            await asyncio.sleep(min(0.1, remaining))
+         cancel = threading.Event() if cancellable else None
+         with cancel_guard:
+             current_cancel = cancel
              current_client = client_id
          return cancel, _make_release_once(transcribe_lock)
  
@@ -81,7 +106,7 @@ index c9933d1..76e3b8a 100644
      @app.get("/instruments")
      async def list_instruments():
          return {"instruments": list(MT3_FULL_PLUS_GROUP_NAMES.keys())}
-@@ -215,6 +245,93 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -215,6 +247,99 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
          path = await asyncio.to_thread(download_if_necessary, SF3_URL)
          return FileResponse(path, media_type="application/octet-stream")
  
@@ -90,6 +115,8 @@ index c9933d1..76e3b8a 100644
 +    rhythm_guard = threading.Lock()
 +
 +    def rhythm_payload(raw, detection, settings, duration):
++        if settings is None:
++            settings = {}
 +        timeline = rhythm.Timeline(settings, detection, duration)
 +        result = rhythm.retime(raw, timeline)
 +        result["quantized_midi"] = result["data"] if result["quantized"] else None
@@ -101,6 +128,8 @@ index c9933d1..76e3b8a 100644
 +
 +    @app.post("/rhythm/reexport")
 +    async def reexport(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
++        if not isinstance(body.get("session"), str):
++            raise HTTPException(422, "Choose a valid session.")
 +        with rhythm_guard:
 +            cached = rhythm_sessions.get(body.get("session"))
 +        if cached is None or cached[0] != x_client_id:
@@ -146,6 +175,8 @@ index c9933d1..76e3b8a 100644
 +    @app.post("/session/export")
 +    async def export_session(body: Annotated[dict, Body()], x_client_id: Annotated[str | None, Header()] = None):
 +        from muscriptor.utils import session
++        if not isinstance(body.get("session"), str):
++            raise HTTPException(422, "Choose a valid session.")
 +        with rhythm_guard:
 +            cached = rhythm_sessions.get(body.get("session"))
 +        if cached is None or cached[0] != x_client_id:
@@ -175,7 +206,7 @@ index c9933d1..76e3b8a 100644
      @app.post("/transcribe")
      async def transcribe(
          file: Annotated[UploadFile, File()],
-@@ -222,24 +339,24 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -222,24 +347,24 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
          # "true" fails loudly on tempo detection errors, "false" doesn't even try
          detect_tempo: Annotated[TempoDetection, Form()] = "best-effort",
          x_client_id: Annotated[str | None, Header()] = None,
@@ -206,7 +237,7 @@ index c9933d1..76e3b8a 100644
 -                    status_code=400,
 -                    detail=f"could not decode audio file '{file.filename}': {e}",
 -                ) from e
-+            wav, sr = read_audio(io.BytesIO(data))
++            wav, sr = await asyncio.to_thread(read_audio, io.BytesIO(data))
 +        except Exception as e:
 +            raise HTTPException(
 +                status_code=400,
@@ -215,14 +246,18 @@ index c9933d1..76e3b8a 100644
  
          unknown = [n for n in instruments if n not in MT3_FULL_PLUS_GROUP_NAMES]
          if unknown:
-@@ -259,19 +376,28 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -259,19 +384,32 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
              x_client_id, cancellable=True
          )
  
 +        from muscriptor.utils.partial import FinishableTranscription
 +        nonlocal current_finish
-+        run = FinishableTranscription(model.transcribe((wav, sr), instruments=instruments or None,
-+                                      batch_size=1, no_eos_is_ok=True), wav.shape[-1] / sr, threading.Event())
++        try:
++            run = FinishableTranscription(model.transcribe((wav, sr), instruments=instruments or None,
++                                          batch_size=1, no_eos_is_ok=True), wav.shape[-1] / sr, threading.Event())
++        except BaseException:
++            release_lock()
++            raise
 +        with cancel_guard:
 +            current_finish = (x_client_id, run_id, run)
 +        release_inference = release_lock
@@ -251,7 +286,7 @@ index c9933d1..76e3b8a 100644
                      # A newer request preempted this run — stop generating
                      # (closing the model.transcribe generator) and release the
                      # lock via the finally, at most one chunk after the signal.
-@@ -285,11 +411,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -285,11 +423,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
                                  "type": "progress",
                                  "completed": ev.completed,
                                  "total": ev.total,
@@ -265,7 +300,7 @@ index c9933d1..76e3b8a 100644
                      payload = json.dumps(event_to_dict(ev))
                      yield f"data: {payload}\n\n"
                  # All notes streamed — build the MIDI file in memory (reusing the
-@@ -297,9 +424,33 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -297,9 +436,33 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
                  # with the bytes base64-encoded.
                  if cancel.is_set():
                      return
@@ -300,7 +335,7 @@ index c9933d1..76e3b8a 100644
                  # Measure the onset lag up here rather than leaving it to the MIDI
                  # writing, since the UI has to be told the very same number to move
                  # the notes it already drew.
-@@ -327,6 +478,8 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -327,6 +490,8 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
                  payload = json.dumps(
                      {
                          "type": "transcription_complete",
@@ -309,15 +344,19 @@ index c9933d1..76e3b8a 100644
                          "data": midi_b64,
                          "quantized_midi": base64.b64encode(quantized_midi).decode(
                              "ascii"
-@@ -350,6 +503,7 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -350,7 +515,10 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
                  )
                  yield f"data: {payload}\n\n"
              finally:
-+                if "stream" in locals(): stream.close()
-                 release_lock()
+-                release_lock()
++                try:
++                    if "stream" in locals(): stream.close()
++                finally:
++                    release_lock()
  
          return StreamingResponse(
-@@ -376,15 +530,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+             gen(),
+@@ -376,15 +544,12 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
          """
          data = await file.read()
          try:
@@ -330,7 +369,7 @@ index c9933d1..76e3b8a 100644
 -                    status_code=400,
 -                    detail=f"could not decode audio file '{file.filename}': {e}",
 -                ) from e
-+            wav, sr = read_audio(io.BytesIO(data))
++            wav, sr = await asyncio.to_thread(read_audio, io.BytesIO(data))
 +        except Exception as e:
 +            raise HTTPException(
 +                status_code=400,
@@ -339,7 +378,7 @@ index c9933d1..76e3b8a 100644
  
          duration_s = wav.shape[-1] / sr
          if duration_s > _MAX_TRANSCRIBE_MIDI_DURATION_S:
-@@ -454,42 +605,28 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
+@@ -454,42 +619,28 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) ->
              )
  
          midi_data = await midi.read()
@@ -402,10 +441,20 @@ index c9933d1..76e3b8a 100644
  
      @app.post("/sheets")
 diff --git a/muscriptor/utils/audio.py b/muscriptor/utils/audio.py
-index 18037eb..855f062 100644
+index 18037eb..65afc60 100644
 --- a/muscriptor/utils/audio.py
 +++ b/muscriptor/utils/audio.py
-@@ -30,6 +30,9 @@ def _read_wav_file(source) -> tuple[torch.Tensor, int]:
+@@ -2,6 +2,9 @@
+ other formats fall back to `soundfile`."""
+ 
+ import wave
++import os
++import subprocess
++import tempfile
+ from pathlib import Path
+ from typing import IO
+ 
+@@ -30,6 +33,9 @@ def _read_wav_file(source) -> tuple[torch.Tensor, int]:
          n_frames = wf.getnframes()
          raw = wf.readframes(n_frames)
  
@@ -415,10 +464,55 @@ index 18037eb..855f062 100644
      if sampwidth == 1:
          data = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
          data = (data - 128.0) / 128.0
-@@ -78,6 +81,21 @@ def _read_non_wav_file(source: str | Path | IO[bytes]) -> tuple[torch.Tensor, in
+@@ -71,13 +77,65 @@ def _read_non_wav_file(source: str | Path | IO[bytes]) -> tuple[torch.Tensor, in
+         ) from e
+ 
+     target = str(source) if isinstance(source, (str, Path)) else source
+-    data, sample_rate = sf.read(target, dtype="float32")
++    try:
++        data, sample_rate = sf.read(target, dtype="float32")
++    except sf.LibsndfileError:
++        return _read_ffmpeg_file(source)
+     if data.ndim == 1:
+         data = data[:, None]
+     wav = torch.from_numpy(np.ascontiguousarray(data.T))
      return wav, sample_rate
  
  
++def _read_ffmpeg_file(source) -> tuple[torch.Tensor, int]:
++    """Decode seek-dependent formats (including M4A/AAC) for HTTP uploads too."""
++    try:
++        import imageio_ffmpeg
++    except ImportError:
++        raise ValueError("This audio format needs the bundled FFmpeg decoder.") from None
++    with tempfile.TemporaryDirectory(prefix="muscriptor-decode-") as directory:
++        folder = Path(directory)
++        if isinstance(source, (str, Path)):
++            encoded = Path(source)
++        else:
++            source.seek(0)
++            encoded = folder / "upload"
++            with encoded.open("wb") as target:
++                import shutil
++                shutil.copyfileobj(source, target)
++        decoded = folder / "decoded.wav"
++        try:
++            result = subprocess.run(
++                [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-xerror",
++                 "-i", str(encoded), "-map", "0:a:0", "-vn", "-c:a", "pcm_s24le", str(decoded)],
++                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120,
++                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
++            )
++        except subprocess.TimeoutExpired:
++            raise ValueError("Audio decoding took too long. Try a shorter recording.") from None
++        if result.returncode:
++            detail = result.stderr.decode(errors="replace").lower()
++            if "no space left" in detail:
++                raise OSError("Not enough disk space to decode this recording.")
++            raise ValueError("This file could not be decoded. It may be damaged or unsupported.")
++        return _read_wav_file(decoded)
++
++
 +def read_audio(source) -> tuple[torch.Tensor, int]:
 +    """Decode and validate one source before it reaches resampling/inference."""
 +    try:
@@ -437,7 +531,7 @@ index 18037eb..855f062 100644
  def resample(
      waveform: torch.Tensor,
      orig_freq: int,
-@@ -101,12 +119,11 @@ def load_audio(path: str | Path, target_sr: int = 16000) -> torch.Tensor:
+@@ -101,12 +159,11 @@ def load_audio(path: str | Path, target_sr: int = 16000) -> torch.Tensor:
          Tensor of shape [1, T] at target_sr.
      """
      filepath = Path(path)
@@ -489,15 +583,16 @@ index a214a33..62779a1 100644
      <link rel="icon" type="image/svg+xml" href="/muscriptor-mark-v4.svg" />
      <link rel="preconnect" href="https://fonts.googleapis.com" />
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index c3a61b9..94bea66 100644
+index c3a61b9..bc7d4c6 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
++import { installFileDrop } from "./fileDrop";
 +import { readRecovery, hasSavedRecovery, type SavedSession } from "./sessionStorage";
  import { useEffect, useRef, useState } from "react";
  import clsx from "clsx";
  import type { PianoRoll } from "./pianoroll";
-@@ -7,13 +8,16 @@ import {
+@@ -7,13 +9,16 @@ import {
    type AppState,
    type TranscriptionResult,
  } from "./hooks/useTranscription";
@@ -515,7 +610,7 @@ index c3a61b9..94bea66 100644
  import { WelcomeScreen } from "./components/WelcomeScreen";
  import { ConsentBanner } from "./components/ConsentBanner";
  import { Faq } from "./components/Faq";
-@@ -71,6 +75,19 @@ export function App() {
+@@ -71,6 +76,19 @@ export function App() {
    const progressFillRef = useRef<HTMLDivElement | null>(null);
    const progressLabelRef = useRef<HTMLSpanElement | null>(null);
  
@@ -535,7 +630,7 @@ index c3a61b9..94bea66 100644
    const [screen, setScreen] = useState<Screen>("welcome");
    const [selectedFile, setSelectedFile] = useState<File | null>(null);
    const [appState, setAppState] = useState<AppState>("idle");
-@@ -100,10 +117,23 @@ export function App() {
+@@ -100,10 +118,23 @@ export function App() {
    const appStateRef = useRef(appState);
    appStateRef.current = appState;
  
@@ -560,7 +655,7 @@ index c3a61b9..94bea66 100644
      progress,
      // A failed transcription bounces back to the welcome screen with a message.
      onError: (message) => {
-@@ -125,6 +155,44 @@ export function App() {
+@@ -125,6 +156,44 @@ export function App() {
      setCurrentFile,
      setUserScrolled,
    });
@@ -605,7 +700,7 @@ index c3a61b9..94bea66 100644
    // Submit the file picked on the welcome screen. The view only switches once
    // the server has accepted the request (`onAccepted` above); until then the
    // button reports progress — including waiting out a busy server. Called from
-@@ -173,6 +241,7 @@ export function App() {
+@@ -173,6 +242,7 @@ export function App() {
      rollRef.current?.clear();
      setInstruments([]);
      setResult(null);
@@ -613,7 +708,104 @@ index c3a61b9..94bea66 100644
      setUserScrolled(false);
      setAppState("idle");
      setSubmit({ phase: "idle" });
-@@ -343,13 +412,11 @@ export function App() {
+@@ -190,12 +260,16 @@ export function App() {
+   // Load the bundled demo track and pre-fill conditioning with a reasonable
+   // guess for it (a rock track). The user still reviews and hits "Transcribe".
+   async function useExample() {
+-    const resp = await fetch(EXAMPLE.url);
+-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+-    const blob = await resp.blob();
+-    const file = new File([blob], EXAMPLE.filename, { type: "audio/mpeg" });
+-    setCondSelected(new Set(EXAMPLE.conditioning));
+-    pickFile(file);
++    try {
++      const resp = await fetch(EXAMPLE.url);
++      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
++      const blob = await resp.blob();
++      const file = new File([blob], EXAMPLE.filename, { type: "audio/mpeg" });
++      setCondSelected(new Set(EXAMPLE.conditioning));
++      pickFile(file);
++    } catch {
++      setError({kind: "file", message: "The example could not be loaded. Choose your own recording or reopen the web GUI."});
++    }
+   }
+ 
+   // A file dropped anywhere on the page selects it on the welcome screen, from
+@@ -204,6 +278,14 @@ export function App() {
+   // before hitting "Transcribe". It does not auto-start. Routed through a ref so
+   // the window-level handler (installed once) always calls the latest closure.
+   function onDropFile(file: File) {
++    if (/\.muscriptor$/i.test(file.name)) {
++      void readProjectFile(file);
++      return;
++    }
++    if (file.size === 0) {
++      setTimingError("Choose a nonempty audio file. Folders cannot be transcribed.");
++      return;
++    }
+     // Dropping onto the transcribe screen abandons the current run — confirm
+     // first, then tear everything down (stop playback, clear the roll) so the
+     // music doesn't keep playing behind the welcome screen.
+@@ -222,45 +304,19 @@ export function App() {
+     document.body.dataset.state = appState;
+   }, [appState]);
+ 
+-  // Drag & drop works anywhere on the page; a fullscreen overlay (CSS, keyed off
+-  // `body.drag`) shows while a file is being dragged. dragenter/dragleave fire
+-  // on every child element, so keep a depth counter to know when the drag truly
+-  // left the window.
+-  useEffect(() => {
+-    let dragDepth = 0;
+-    const onEnter = (e: DragEvent) => {
+-      e.preventDefault();
+-      dragDepth++;
+-      document.body.classList.add("drag");
+-      setDragging(true);
+-    };
+-    const onOver = (e: DragEvent) => e.preventDefault();
+-    const onLeave = () => {
+-      dragDepth = Math.max(0, dragDepth - 1);
+-      if (dragDepth === 0) {
+-        document.body.classList.remove("drag");
+-        setDragging(false);
+-      }
+-    };
+-    const onDrop = (e: DragEvent) => {
+-      e.preventDefault();
+-      dragDepth = 0;
+-      document.body.classList.remove("drag");
+-      setDragging(false);
+-      const f = e.dataTransfer?.files?.[0];
+-      if (f) dropRef.current(f);
+-    };
+-    window.addEventListener("dragenter", onEnter);
+-    window.addEventListener("dragover", onOver);
+-    window.addEventListener("dragleave", onLeave);
+-    window.addEventListener("drop", onDrop);
+-    return () => {
+-      window.removeEventListener("dragenter", onEnter);
+-      window.removeEventListener("dragover", onOver);
+-      window.removeEventListener("dragleave", onLeave);
+-      window.removeEventListener("drop", onDrop);
+-    };
+-  }, []);
++  // The ref keeps the latest screen/session state in the global drop handler.
++  useEffect(() => installFileDrop(
++    file => dropRef.current(file), setDragging, setTimingError,
++  ), []);
++
++  async function readProjectFile(file: File) {
++    if (file.size > 256*1024*1024) { setTimingError("Session exceeds 256 MB."); return; }
++    if (timingBusy || appState === "transcribing" || submit.phase !== "idle") {
++      setTimingError("Finish or cancel the current operation before opening a session."); return;
++    }
++    try { await loadProject(JSON.parse(await file.text())); }
++    catch { setTimingError("This session could not be read."); }
++  }
+ 
+   // Space toggles play/pause on the transcribe screen. Ignored while focus is
+   // on a form control (slider, checkbox, button) so its native space behavior
+@@ -343,13 +399,11 @@ export function App() {
  
    return (
      <>
@@ -629,7 +821,7 @@ index c3a61b9..94bea66 100644
              screen === "transcribe" && "cursor-pointer",
            )}
            onClick={screen === "transcribe" ? transcribeAnother : undefined}
-@@ -370,22 +437,62 @@ export function App() {
+@@ -370,22 +424,61 @@ export function App() {
            <img
              src="/muscriptor-logo-v4.svg"
              alt="MuScriptor logo"
@@ -682,8 +874,7 @@ index c3a61b9..94bea66 100644
 +      <div className={clsx("mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-7 pb-3 text-xs text-muted", !sessionNotice && !timingError && appState !== 'transcribing' && "hidden")}>
 +        <input ref={sessionInputRef} type="file" accept=".muscriptor" hidden onChange={async e => {
 +          const file=e.target.files?.[0]; e.target.value=''; if (!file) return;
-+          if(file.size>256*1024*1024) {setTimingError('Session exceeds 256 MB.');return;}
-+          try {await loadProject(JSON.parse(await file.text()));} catch {setTimingError('This session could not be read.');}
++          await readProjectFile(file);
 +        }}/>
 +        {appState === 'transcribing' && (finishState.ready || finishState.pending) && <>
 +          <button disabled={finishState.pending} onClick={() => void finishHere()} title="Saves fully completed 5-second sections. The unfinished section is omitted.">
@@ -699,7 +890,7 @@ index c3a61b9..94bea66 100644
        {screen === "welcome" ? (
          <>
            <WelcomeScreen
-@@ -400,6 +507,7 @@ export function App() {
+@@ -400,6 +493,7 @@ export function App() {
              dragging={dragging}
              error={error}
              setError={setError}
@@ -707,7 +898,7 @@ index c3a61b9..94bea66 100644
            />
            <Faq />
          </>
-@@ -443,11 +551,17 @@ export function App() {
+@@ -443,11 +537,17 @@ export function App() {
  
            {/* Below the roll: the transcription job itself — progress, export,
                and starting over. */}
@@ -1701,6 +1892,73 @@ index 594aecd..9a62bdf 100644
    const beat = 60 / grid.bpm;
    // Meter unknown: shade every beat, there's nothing coarser to group them into.
    let step = (grid.beats_per_bar ?? 1) * beat;
+diff --git a/web/src/sse.ts b/web/src/sse.ts
+index 759b08f..40d1196 100644
+--- a/web/src/sse.ts
++++ b/web/src/sse.ts
+@@ -71,20 +71,25 @@ export async function* streamTranscribe(
+     .pipeThrough(new TextDecoderStream())
+     .getReader();
+   let buf = "";
+-  while (true) {
+-    const { value, done } = await reader.read();
+-    if (done) break;
+-    buf += value;
+-    let sep: number;
+-    while ((sep = buf.indexOf("\n\n")) !== -1) {
+-      const chunk = buf.slice(0, sep);
+-      buf = buf.slice(sep + 2);
+-      for (const line of chunk.split("\n")) {
+-        if (line.startsWith("data: ")) {
+-          yield JSON.parse(line.slice(6));
+-        }
++  try {
++    while (true) {
++      const { value, done } = await reader.read();
++      if (done) break;
++      buf += value;
++      let separator: RegExpExecArray | null;
++      while ((separator = /\r?\n\r?\n/.exec(buf)) !== null) {
++        const chunk = buf.slice(0, separator.index);
++        buf = buf.slice(separator.index + separator[0].length);
++        const data = chunk.split(/\r?\n/).filter(line => line.startsWith("data:"))
++          .map(line => line.slice(5).replace(/^ /, "")).join("\n");
++        if (data) yield JSON.parse(data);
+       }
+     }
++  } finally {
++    // Closing an iterator early must close the HTTP stream and release the
++    // backend's transcription lock, even without an explicit AbortController.
++    await reader.cancel().catch(() => {});
++    reader.releaseLock();
+   }
+ }
+ 
+@@ -97,15 +102,15 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
+       reject(new DOMException("Aborted", "AbortError"));
+       return;
+     }
+-    const timer = setTimeout(resolve, ms);
+-    signal?.addEventListener(
+-      "abort",
+-      () => {
+-        clearTimeout(timer);
+-        reject(new DOMException("Aborted", "AbortError"));
+-      },
+-      { once: true },
+-    );
++    const aborted = () => {
++      clearTimeout(timer);
++      reject(new DOMException("Aborted", "AbortError"));
++    };
++    const timer = setTimeout(() => {
++      signal?.removeEventListener("abort", aborted);
++      resolve();
++    }, ms);
++    signal?.addEventListener("abort", aborted, { once: true });
+   });
+ }
+ 
 diff --git a/web/src/style.css b/web/src/style.css
 index d756a9a..5c528cc 100644
 --- a/web/src/style.css
@@ -2762,10 +3020,10 @@ index 0000000..38f5365
 +    return dict(beats=beats.tolist(),downbeats=low[accents].tolist(),meter_segments=segments)
 diff --git a/muscriptor/utils/session.py b/muscriptor/utils/session.py
 new file mode 100644
-index 0000000..2534fdd
+index 0000000..da3e9b6
 --- /dev/null
 +++ b/muscriptor/utils/session.py
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,141 @@
 +"""Versioned, data-only local projects shared by desktop and browser."""
 +import base64
 +import io
@@ -2850,10 +3108,17 @@ index 0000000..2534fdd
 +        raise RhythmError('Session meter suggestions need a beat grid.')
 +    d = Detection(*arrays, warning, pulse_verified, segments)
 +    settings = project.get('timing', {})
++    if not isinstance(settings, dict):
++        raise RhythmError('Session timing settings must be an object.')
 +    Timeline(settings, d, duration)
-+    audio = decode(project.get('audio')) if project.get('audio') else None
++    encoded_audio = project.get('audio')
++    if encoded_audio is not None and not isinstance(encoded_audio, str):
++        raise RhythmError('Session audio must be encoded data or null.')
++    audio = decode(encoded_audio) if encoded_audio else None
 +    name = str(project.get('name', 'Recording'))[:240].replace('\\', '/').split('/')[-1] or 'Recording'
 +    audio_name = str(project.get('audio_name', 'recording.wav')).replace('\\', '/').split('/')[-1]
++    if audio and Path(audio_name).suffix.lower() not in ('.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.aiff', '.aif', '.wma', '.mp4', '.webm', '.mkv', '.mov'):
++        raise RhythmError('Session audio format is unsupported.')
 +    return raw, d, duration, settings, audio, name, audio_name
 +
 +
@@ -3018,6 +3283,72 @@ index 0000000..36b9287
 +    {error && <p role="alert" className="rhythm-warning">{error}</p>}
 +    {!dirty && warnings?.map((w,i) => <p key={i} className="rhythm-warning">{w}</p>)}
 +  </section>;
++}
+diff --git a/web/src/fileDrop.ts b/web/src/fileDrop.ts
+new file mode 100644
+index 0000000..864d163
+--- /dev/null
++++ b/web/src/fileDrop.ts
+@@ -0,0 +1,60 @@
++/** File-only drop routing, including nested elements and cancelled OS drags. */
++export function installFileDrop(
++  onFile: (file: File) => void,
++  onDragging: (active: boolean) => void,
++  onError: (message: string) => void,
++) {
++  let depth = 0;
++  const isFile = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
++  const clear = () => {
++    depth = 0;
++    document.body.classList.remove("drag");
++    onDragging(false);
++  };
++  const enter = (event: DragEvent) => {
++    if (!isFile(event)) return;
++    event.preventDefault();
++    depth++;
++    document.body.classList.add("drag");
++    onDragging(true);
++  };
++  const over = (event: DragEvent) => {
++    if (!isFile(event)) return;
++    event.preventDefault();
++    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
++  };
++  const leave = () => {
++    // Some browsers hide transfer types on dragleave. Use the accepted depth.
++    if (!depth) return;
++    depth--;
++    if (!depth) clear();
++  };
++  const drop = (event: DragEvent) => {
++    if (!isFile(event)) return;
++    event.preventDefault();
++    clear();
++    if (event.dataTransfer?.files.length !== 1) {
++      onError("Drop one audio file or MuScriptor session at a time.");
++      return;
++    }
++    const file = event.dataTransfer.files[0];
++    if (!file.size) {
++      onError("Choose a nonempty audio file. Folders cannot be transcribed.");
++      return;
++    }
++    onFile(file);
++  };
++  window.addEventListener("dragenter", enter);
++  window.addEventListener("dragover", over);
++  window.addEventListener("dragleave", leave);
++  window.addEventListener("drop", drop);
++  window.addEventListener("blur", clear);
++  return () => {
++    window.removeEventListener("dragenter", enter);
++    window.removeEventListener("dragover", over);
++    window.removeEventListener("dragleave", leave);
++    window.removeEventListener("drop", drop);
++    window.removeEventListener("blur", clear);
++    clear();
++  };
 +}
 diff --git a/web/src/sessionStorage.ts b/web/src/sessionStorage.ts
 new file mode 100644

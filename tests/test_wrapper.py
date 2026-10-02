@@ -74,6 +74,40 @@ class WrapperTests(unittest.TestCase):
                 self.assertTrue(fallback)
                 self.assertEqual(writer.call_args.args[0], Path(folder) / "Results")
 
+    def test_windows_publication_uses_rename_without_hardlinks_and_keeps_collisions(self):
+        folder=self.folder/'windows-output'; folder.mkdir()
+        existing=folder/'song.mid'; existing.write_bytes(b'original')
+        rename=worker.os.rename
+        def windows_rename(source,target):
+            if target.exists(): raise FileExistsError()
+            rename(source,target)
+        with patch.object(worker.sys,'platform','win32'), patch.object(worker.os,'link',side_effect=AssertionError('hard links unsupported')), patch.object(worker.os,'rename',side_effect=windows_rename):
+            result=worker.write_unique(folder,'song',b'new')
+        self.assertEqual(existing.read_bytes(),b'original')
+        self.assertEqual(result.name,'song (2).mid'); self.assertEqual(result.read_bytes(),b'new')
+        self.assertFalse(list(folder.glob('.muscriptor-*')))
+
+    def test_long_unicode_output_names_and_windows_reserved_names_are_safe(self):
+        folder=self.folder/'long-output'; folder.mkdir()
+        path=worker.write_unique(folder,'音楽'*100,b'midi')
+        self.assertLessEqual(len(path.name.encode('utf-8')),255)
+        self.assertEqual(path.read_bytes(),b'midi')
+        with patch.object(worker.sys,'platform','win32'):
+            for name in ('CON','nul','com1','LPT9'):
+                self.assertTrue(worker.output_name(name).startswith('_'))
+            self.assertEqual(worker.output_name('song:take?* '),'song_take__')
+
+    def test_failed_model_placement_does_not_poison_retry(self):
+        engine=worker.Engine.__new__(worker.Engine)
+        engine.model=None;engine.model_size='small';engine.device='cuda:0'
+        model=Mock();parameter=Mock();parameter.device.type='cpu'
+        model._model.parameters.side_effect=lambda:iter([parameter])
+        with patch.object(worker,'get_weights',return_value=Path('/weights')),patch('muscriptor.TranscriptionModel.load_model',return_value=model) as load,patch.object(worker,'emit'):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError,'selected device'): engine.load()
+                self.assertIsNone(engine.model)
+            self.assertEqual(load.call_count,2)
+
     def test_only_device_errors_trigger_cpu_retry(self):
         self.assertTrue(worker.mps_error(RuntimeError("MPS backend out of memory")))
         self.assertTrue(worker.mps_error(NotImplementedError("operation unavailable for MPS")))

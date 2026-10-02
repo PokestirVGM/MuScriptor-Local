@@ -33,6 +33,7 @@ class WebGUITests(unittest.TestCase):
             self.assertIn('acoustic_piano', client.get('/instruments').json()['instruments'])
             self.assertEqual(client.get('/health', headers={'Origin': origin}).status_code, 200)
             self.assertEqual(client.post('/transcribe', headers={'Origin': 'https://unrelated.example'}).status_code, 403)
+            self.assertEqual(client.get('/session/recovery', headers={'Sec-Fetch-Site':'cross-site'}).status_code,403)
             self.assertEqual(client.get('/health', headers={'Host': 'unrelated.example'}).status_code, 400)
             asset = next((directory / 'assets').glob('*.js')).name
             self.assertEqual(client.get('/assets/' + asset).status_code, 200)
@@ -87,6 +88,38 @@ worker.open_web_gui(Mock(model_size='small', device='cpu'))
 
 
 class AudioExportResponsivenessTests(unittest.TestCase):
+    def test_slow_audio_decode_keeps_health_requests_responsive(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from muscriptor.server import create_app
+        entered=threading.Event();resume=threading.Event()
+        def decode(source):
+            entered.set()
+            if not resume.wait(5): raise RuntimeError('Test timed out')
+            raise ValueError('controlled invalid audio')
+        with patch('muscriptor.server.read_audio',side_effect=decode), TestClient(create_app(Mock())) as client, ThreadPoolExecutor(max_workers=2) as pool:
+            pending=pool.submit(client.post,'/transcribe',files={'file':('song.wav',b'audio')})
+            try:
+                self.assertTrue(entered.wait(3))
+                self.assertEqual(pool.submit(client.get,'/health').result(timeout=1).status_code,200)
+            finally: resume.set()
+            self.assertEqual(pending.result(timeout=5).status_code,400)
+
+    def test_synchronous_model_error_does_not_leave_inference_locked(self):
+        from muscriptor.server import create_app
+        from test_audio_validation import pcm
+        from test_finish_transcription import midi_model
+        from muscriptor.events import ProgressEvent
+        from muscriptor.utils import rhythm
+        model=midi_model(); model.transcribe=Mock(side_effect=RuntimeError('controlled model error'))
+        with TestClient(create_app(model),raise_server_exceptions=False) as client:
+            files={'file':('song.wav',pcm(b'\0\0'*16000))}
+            self.assertEqual(client.post('/transcribe',files=files).status_code,500)
+            model.transcribe=lambda *a,**kw:iter([ProgressEvent(0,1),ProgressEvent(1,1)])
+            with patch.object(rhythm,'detect',return_value=rhythm.Detection([],[])):
+                response=client.post('/transcribe',files=files,data={'timing':'{"mode":"manual","bpm":120}'})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertIn('transcription_complete',response.text)
+
     def test_synthesis_keeps_health_requests_responsive_and_cleans_temporary_files(self):
         from concurrent.futures import ThreadPoolExecutor
         from muscriptor.server import create_app

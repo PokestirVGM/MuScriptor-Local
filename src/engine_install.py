@@ -1,5 +1,6 @@
 """Staged engine refresh with rollback after copy failures or interruption."""
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
@@ -31,8 +32,38 @@ def recover(root):
     remove(transaction)
 
 
+@contextmanager
+def installation_lock(root):
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / '.engine-update.lock').open('a+b') as lock:
+        if sys.platform == 'win32':
+            import msvcrt
+            if lock.tell() == 0:
+                lock.write(b'\0'); lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def install(root, bundled_worker, bundled_package):
     root = Path(root)
+    # A second app launch must never roll back another process's live update.
+    with installation_lock(root):
+        _install_locked(root, bundled_worker, bundled_package)
+
+
+def _install_locked(root, bundled_worker, bundled_package):
     recover(root)
     transaction = root / '.engine-update'
     transaction.mkdir()

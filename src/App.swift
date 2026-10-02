@@ -145,6 +145,7 @@ final class AppState: ObservableObject {
     private var input: FileHandle?
     private var activity: NSObjectProtocol?
     private var started = false
+    private var lastAction: String?
     private var repairing = false
     private var setupProcess: Process?
     let root = URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "MuScriptorRoot") as? String ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MuScriptor Local/Engine").path)
@@ -252,6 +253,7 @@ final class AppState: ObservableObject {
     }
 
     func send(_ command: [String: Any]) {
+        if command["action"] as? String != "finish_transcription" { lastAction = command["action"] as? String }
         guard let data = try? JSONSerialization.data(withJSONObject: command), let input = input, worker?.isRunning == true else {
             busy = false; error = "The engine connection closed. Click Try Again to restart it."; endActivity(); return
         }
@@ -392,8 +394,13 @@ final class AppState: ObservableObject {
     }
 
     func convert(_ url: URL) {
-        guard !busy, confirmDiscardTiming() else { return }
+        guard !busy, webURL == nil else { return }
         guard url.isFileURL else { error = "Choose an audio file stored on this Mac."; return }
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            error = "Choose a file stored on this Mac."; return
+        }
+        if url.pathExtension.lowercased() == "muscriptor" { openSession(path: url.path); return }
+        guard confirmDiscardTiming() else { return }
         hasSession = false; timingSummary = ""; source = url; destination = nil; result = nil; abResult = nil; filename = url.lastPathComponent
         planOutput()
     }
@@ -469,6 +476,10 @@ final class AppState: ObservableObject {
     func retry() {
         error = ""
         if worker == nil || !(worker?.isRunning ?? false) { started = false; start() }
+        else if lastAction == "load_session" { openSession() }
+        else if hasSession && lastAction == "reexport_session" { applySession() }
+        else if hasSession && lastAction == "preview_rhythm" { previewRhythm() }
+        else if hasSession && lastAction == "save_session" { saveSession() }
         else if setup { prepare() }
         else if source != nil && destination == nil { planOutput() }
         else if source != nil && result == nil { transcribe() }
@@ -795,7 +806,7 @@ struct ContentView: View {
                         Text("Medium").tag("medium")
                         Text("Large").tag("large")
                     }.pickerStyle(.segmented).labelsHidden().disabled(state.busy || state.webURL != nil)
-                    Text("Small uses less memory · Medium balances size and accuracy · Large favors accuracy")
+                    Text("Small suits CPU use · Medium balances speed and accuracy · Large favors accuracy and works best on a GPU")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -929,10 +940,11 @@ struct ContentView: View {
             }.padding(28)
         }.frame(minWidth: 560, minHeight: 560, maxHeight: .infinity)
         .onDrop(of: [UTType.fileURL], isTargeted: $hovering) { providers in
-            guard !state.busy, state.webURL == nil, let provider = providers.first else { return false }
+            guard !state.busy, state.webURL == nil, providers.count == 1, let provider = providers.first else { return false }
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 let url: URL?
                 if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
+                else if let value = item as? String { url = URL(string: value) }
                 else { url = item as? URL }
                 if let url = url { DispatchQueue.main.async { state.convert(url) } }
             }

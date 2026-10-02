@@ -3,15 +3,17 @@ import io
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 import wave
 import numpy as np
 import soundfile as sf
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'upstream')]
 from fastapi.testclient import TestClient
 from muscriptor.server import create_app
-from muscriptor.utils.audio import load_audio
+from muscriptor.utils.audio import load_audio, read_audio
 
 
 def pcm(samples=b'', channels=1):
@@ -59,3 +61,25 @@ class AudioValidationTests(unittest.TestCase):
                 decoded=load_audio(path)
                 self.assertEqual(tuple(decoded.shape),(1,2))
                 np.testing.assert_allclose(decoded.numpy(),[[.125,.25]],atol=1e-7)
+
+    def test_compressed_uploads_decode_by_content_including_m4a_and_aac(self):
+        import imageio_ffmpeg
+        from muscriptor.events import ProgressEvent
+        from muscriptor.utils import rhythm
+        from test_finish_transcription import midi_model
+        model=midi_model()
+        model.transcribe=lambda *args,**kw: iter([ProgressEvent(0,1),ProgressEvent(1,1)])
+        with tempfile.TemporaryDirectory() as directory, TestClient(create_app(model)) as client:
+            source=Path(directory)/'source.wav'
+            source.write_bytes(pcm((np.sin(np.arange(16000)*.04)*8192).astype('<i2').tobytes()))
+            for suffix,codec in [('m4a','aac'),('aac','aac'),('mp3','libmp3lame'),('flac','flac')]:
+                path=Path(directory)/('encoded.'+suffix)
+                subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-i',str(source),'-c:a',codec,str(path)],check=True)
+                data=path.read_bytes()
+                with self.subTest(suffix=suffix):
+                    wav,sr=read_audio(io.BytesIO(data))
+                    self.assertEqual(sr,16000);self.assertGreaterEqual(wav.shape[-1],16000)
+                    with patch.object(rhythm,'detect',return_value=rhythm.Detection([],[])):
+                        response=client.post('/transcribe',files={'file':('misnamed.wav',data)},data={'timing':'{"mode":"manual","bpm":120}'})
+                    self.assertEqual(response.status_code,200,response.text)
+                    self.assertIn('transcription_complete',response.text)
